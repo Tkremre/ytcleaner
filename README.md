@@ -4,9 +4,9 @@
 
 ### Bring back a cleaner old-school YouTube desktop layout.
 
-No Shorts.  
-No “Most relevant” section.  
-No oversized 3-column desktop grid.
+No Shorts.<br>
+No noisy subscription sections.<br>
+More control over the desktop grid.
 
 [![YouTube](https://img.shields.io/badge/YouTube-Cleaner-red?style=for-the-badge&logo=youtube)](https://www.youtube.com/)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-Userscript-00485B?style=for-the-badge)](https://www.tampermonkey.net/)
@@ -27,11 +27,11 @@ It focuses on the interface around the player, not the player itself.
 The goal is simple:
 
 - remove Shorts from the interface
-- remove the “Most relevant” section from Subscriptions
-- restore a denser desktop grid
+- remove noisy sections from Subscriptions
+- restore a denser desktop grid when you want it
 - keep YouTube clean, simple, and easier to browse
 
-If you miss the 2015–2016 style YouTube desktop experience, this script tries to bring a bit of that feeling back.
+If you miss the 2015-2016 style YouTube desktop experience, this script tries to bring a bit of that feeling back.
 
 ---
 
@@ -39,11 +39,13 @@ If you miss the 2015–2016 style YouTube desktop experience, this script tries 
 
 - Hide YouTube Shorts from the homepage, subscriptions, sidebar, and other common sections
 - Hide the Shorts button from the left sidebar
-- Redirect `/shorts/` pages back to Subscriptions
-- Remove the “Most relevant” section from the Subscriptions page
-- Change the desktop video grid layout
-- Choose between 3, 4, 5, or 6 columns
-- Add a small settings button in the YouTube top bar
+- Redirect `/shorts/` pages back to the YouTube homepage
+- Remove "Most relevant", recommendations, and similar noisy blocks from the Subscriptions page
+- Switch between automatic YouTube columns and a manual grid
+- Use a slider from 1 to 8 video thumbnails per row
+- Show dislike counts on watch pages with Return YouTube Dislike
+- Add a cleaner-style settings button in the YouTube top bar
+- Split settings into clear menu sections
 - Save your settings locally in your browser
 
 ---
@@ -53,11 +55,13 @@ If you miss the 2015–2016 style YouTube desktop experience, this script tries 
 1. [Installation](#installation)
 2. [Usage](#usage)
 3. [Recommended Settings](#recommended-settings)
-4. [Common Issues](#common-issues)
-5. [Update URL](#update-url)
-6. [Contribution](#contribution)
-7. [Disclaimer](#disclaimer)
-8. [License](#license)
+4. [Privacy Notes](#privacy-notes)
+5. [Common Issues](#common-issues)
+6. [Update URL](#update-url)
+7. [Changelog](#changelog)
+8. [Contribution](#contribution)
+9. [Disclaimer](#disclaimer)
+10. [License](#license)
 
 ---
 
@@ -90,7 +94,7 @@ Go to:
 
 Refresh the page.
 
-You should see a small settings icon in the YouTube top bar, near the Create and Notifications buttons.
+You should see a small cleaner icon in the YouTube top bar, near the Create and Notifications buttons.
 
 ---
 
@@ -100,17 +104,22 @@ Click the YouTube Cleaner button in the YouTube top bar to open the settings men
 
 Available settings:
 
-- Enable or disable YouTube Cleaner
-- Enable or disable Shorts page redirection
-- Choose the grid layout:
-  - 3 columns
-  - 4 columns
-  - 5 columns
-  - 6 columns
+- **General**
+  - Enable or disable YouTube Cleaner globally
+- **Shorts**
+  - Enable or disable Shorts hiding
+  - Enable or disable Shorts page redirection
+- **Subscriptions**
+  - Enable or disable noisy subscription section hiding
+- **Layout**
+  - Use YouTube automatic columns
+  - Choose 1 to 8 thumbnails per row with the slider
+- **Extras**
+  - Enable or disable dislike counts on watch pages
 
 Your settings are saved locally in your browser.
 
-No account, server, or external service is used.
+No account, server, or custom backend is used by YouTube Cleaner.
 
 ---
 
@@ -119,10 +128,27 @@ No account, server, or external service is used.
 For a desktop experience closer to older YouTube layouts:
 
 - Cleaner: enabled
+- Hide Shorts: enabled
 - Redirect Shorts pages: enabled
-- Grid columns: 5
+- Hide noisy subscription sections: enabled
+- Automatic grid: disabled
+- Manual columns: 5
 
-For large monitors, 6 columns can also work well.
+For large monitors, 6 to 8 columns can also work well.
+
+If YouTube changes its grid again, try enabling Automatic grid first.
+
+---
+
+## Privacy Notes
+
+Most features run entirely in your browser and only change the local YouTube interface.
+
+The **Show dislikes** option calls the public [Return YouTube Dislike](https://returnyoutubedislike.com/) API for the current video ID. Keep it disabled if you do not want the script to make that external request.
+
+When dislikes are enabled, YouTube Cleaner renders a replacement like/dislike button group, hides the original YouTube controls, and forwards replacement button clicks to the original buttons. This keeps the native YouTube actions available while letting the script display the dislike count.
+
+The replacement reaction buttons refresh their visible counts regularly.
 
 ---
 
@@ -150,6 +176,7 @@ Try:
 - refreshing the page
 - opening YouTube in a new tab
 - checking that YouTube Cleaner is enabled
+- checking that Hide Shorts is enabled
 - checking that no other YouTube script conflicts with it
 
 If Shorts are still visible, open an issue with:
@@ -163,15 +190,21 @@ If Shorts are still visible, open an issue with:
 
 ### The grid layout does not change
 
-Try switching to another column value and then switching back.
+Try switching Automatic grid off, then move the slider to another value.
 
-For example:
+If it still does not work, another extension or userscript may be modifying YouTube's layout.
 
-1. Set the grid to 4 columns
-2. Refresh YouTube
-3. Set the grid back to 5 columns
+---
 
-If it still does not work, another extension or userscript may be modifying YouTube’s layout.
+### Dislikes do not appear
+
+Make sure Show dislikes is enabled and that you are on a regular `/watch?v=...` video page.
+
+If it still does not appear:
+
+- refresh the page
+- check that Tampermonkey allows `returnyoutubedislikeapi.com`
+- check whether another YouTube extension changes the like button area
 
 ---
 
@@ -227,6 +260,34 @@ YouTube-Cleaner.user.js
 
 ---
 
+## Changelog
+
+### 1.0.1
+
+- Added separated menu sections for General, Shorts, Subscriptions, Layout, and Extras
+- Added independent toggles for Shorts hiding, subscription cleanup, and dislikes
+- Added more blocked subscription section titles and normalized accent handling
+- Replaced fixed column buttons with Automatic grid plus a 1 to 8 column slider
+- Added optional Return YouTube Dislike counts on watch pages with replacement reaction buttons
+- Improved replacement reaction button animation and optimistic count updates
+- Added regular reaction counter refresh
+- Replaced the top bar tune icon with a cleaner-style icon
+- Kept the userscript version aligned with this release at `1.0.1`
+
+### 1.0.0
+
+- Initial public release
+- Hide YouTube Shorts across the interface
+- Hide the Shorts button from the left sidebar
+- Redirect `/shorts/` pages back to Subscriptions
+- Remove the "Most relevant" section from the Subscriptions page
+- Add a small settings button in the YouTube top bar
+- Choose between 3, 4, 5, or 6 video columns
+- Save settings locally in the browser
+- Support YouTube dark and light themes
+
+---
+
 ## Contribution
 
 Suggestions, bug reports, and improvements are welcome.
@@ -248,6 +309,7 @@ Useful ideas include:
 - support for more YouTube languages
 - cleaner UI improvements
 - better grid handling for unusual screen sizes
+- better selectors for YouTube UI cleanup
 
 ---
 

@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         YouTube Cleaner
 // @namespace    https://github.com/Tkremre/ytcleaner
-// @version      1.0.0
+// @version      1.0.1
 // @description  Bring back a cleaner old-school YouTube desktop layout.
 // @author       Tkremre
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      returnyoutubedislikeapi.com
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/Tkremre/ytcleaner/main/YouTube-Cleaner.user.js
 // @downloadURL  https://raw.githubusercontent.com/Tkremre/ytcleaner/main/YouTube-Cleaner.user.js
@@ -16,30 +18,58 @@
     'use strict';
 
     const STORAGE_KEY = 'yt_cleaner_settings_v1';
+    const DISLIKE_API_URL = 'https://returnyoutubedislikeapi.com/votes?videoId=';
 
     const DEFAULTS = {
         enabled: true,
         columns: '5',
-        redirectShorts: true
+        automaticColumns: false,
+        hideShorts: true,
+        redirectShorts: true,
+        hideSubscriptionSections: true,
+        showDislikes: false
     };
 
-    const VALID_COLUMNS = ['3', '4', '5', '6'];
+    const VALID_COLUMNS = ['1', '2', '3', '4', '5', '6', '7', '8'];
 
     const BLOCKED_SUBSCRIPTION_TITLES = [
         'most relevant',
         'les plus pertinentes',
-        'más relevantes',
+        'les plus pertinents',
+        'les plus populaires',
+        'mas relevantes',
+        'mas relevante',
+        'mas pertinentes',
         'mais relevantes',
-        'più pertinenti',
+        'mais pertinente',
+        'piu pertinenti',
+        'piu rilevanti',
         'am relevantesten',
+        'relevanteste',
         'meest relevant',
+        'meest relevante',
         'najtrafniejsze',
-        'en alakalı'
+        'najbardziej trafne',
+        'en alakali',
+        'paling relevan',
+        'mest relevant',
+        'mest relevante',
+        'recommended',
+        'recommendations',
+        'videos recommended for you',
+        'videos recommandees pour vous',
+        'chaines recommandees',
+        'from channels you watch'
     ];
 
     let settings = loadSettings();
     let cleanupQueued = false;
     let started = false;
+    let currentDislikeVideoId = '';
+    let currentDislikeRequestId = 0;
+    let reactionSourceId = 0;
+    let lastDislikeRefreshAt = 0;
+    const dislikeCache = new Map();
 
     function loadSettings() {
         try {
@@ -48,9 +78,17 @@
                 ...JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
             };
 
-            if (!VALID_COLUMNS.includes(String(loaded.columns))) {
+            loaded.columns = String(loaded.columns);
+
+            if (!VALID_COLUMNS.includes(loaded.columns)) {
                 loaded.columns = DEFAULTS.columns;
             }
+
+            loaded.automaticColumns = Boolean(loaded.automaticColumns);
+            loaded.hideShorts = loaded.hideShorts !== false;
+            loaded.redirectShorts = loaded.redirectShorts !== false;
+            loaded.hideSubscriptionSections = loaded.hideSubscriptionSections !== false;
+            loaded.showDislikes = Boolean(loaded.showDislikes);
 
             return loaded;
         } catch {
@@ -64,7 +102,12 @@
     }
 
     function normalizeText(value) {
-        return (value || '')
+        return String(value || '')
+            .normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/\u0131/g, 'i')
+            .replace(/[\u2018\u2019]/g, "'")
+            .replace(/[\u201C\u201D]/g, '"')
             .replace(/\s+/g, ' ')
             .trim()
             .toLowerCase();
@@ -112,12 +155,12 @@
         if (!settings.enabled || !settings.redirectShorts) return;
 
         if (location.pathname.startsWith('/shorts/')) {
-            location.replace('https://www.youtube.com/feed/subscriptions');
+            location.replace('https://www.youtube.com/');
         }
     }
 
     function hideShortsNavigation() {
-        if (!settings.enabled) return;
+        if (!settings.enabled || !settings.hideShorts) return;
 
         const navSelectors = [
             'ytd-guide-entry-renderer',
@@ -155,7 +198,7 @@
     }
 
     function hideShortsContent() {
-        if (!settings.enabled) return;
+        if (!settings.enabled || !settings.hideShorts) return;
 
         const selectors = [
             'ytd-reel-shelf-renderer',
@@ -186,7 +229,7 @@
     }
 
     function hideSubscriptionSections() {
-        if (!settings.enabled || !isSubscriptionsPage()) return;
+        if (!settings.enabled || !settings.hideSubscriptionSections || !isSubscriptionsPage()) return;
 
         queryAll('ytd-rich-section-renderer, ytd-reel-shelf-renderer').forEach((section) => {
             const text = normalizeText(section.innerText || section.textContent);
@@ -197,16 +240,558 @@
         });
     }
 
+    function isWatchPage() {
+        return location.pathname === '/watch';
+    }
+
+    function getCurrentVideoId() {
+        if (!isWatchPage()) return '';
+
+        return new URLSearchParams(location.search).get('v') || '';
+    }
+
+    function formatCompactNumber(value) {
+        const number = Number(value);
+
+        if (!Number.isFinite(number)) {
+            return '0';
+        }
+
+        try {
+            return new Intl.NumberFormat(navigator.language || 'en', {
+                notation: 'compact',
+                maximumFractionDigits: 1
+            }).format(number);
+        } catch {
+            return Math.round(number).toLocaleString();
+        }
+    }
+
+    function parseCompactNumber(value) {
+        const text = normalizeText(value)
+            .replace(/\s+/g, '')
+            .replace(',', '.');
+        const match = text.match(/^(\d+(?:\.\d+)?)(k|m)?$/);
+
+        if (!match) return NaN;
+
+        const multiplier = match[2] === 'm' ? 1000000 : match[2] === 'k' ? 1000 : 1;
+        return Number(match[1]) * multiplier;
+    }
+
+    function requestJson(url) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest === 'function') {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url,
+                    timeout: 10000,
+                    onload: (response) => {
+                        if (response.status < 200 || response.status >= 300) {
+                            reject(new Error(`HTTP ${response.status}`));
+                            return;
+                        }
+
+                        try {
+                            resolve(JSON.parse(response.responseText));
+                        } catch (error) {
+                            reject(error);
+                        }
+                    },
+                    onerror: () => reject(new Error('Network error')),
+                    ontimeout: () => reject(new Error('Request timeout'))
+                });
+                return;
+            }
+
+            fetch(url, {
+                cache: 'force-cache',
+                credentials: 'omit'
+            })
+                .then((response) => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+
+                    return response.json();
+                })
+                .then(resolve)
+                .catch(reject);
+        });
+    }
+
+    function fetchDislikeCount(videoId) {
+        return requestJson(`${DISLIKE_API_URL}${encodeURIComponent(videoId)}`)
+            .then((data) => Number(data && data.dislikes) || 0);
+    }
+
+    function readCachedDislikeCount(videoId) {
+        const cached = dislikeCache.get(videoId);
+
+        if (typeof cached === 'number') {
+            return { count: cached, fetchedAt: 0 };
+        }
+
+        if (cached && Number.isFinite(cached.count)) {
+            return cached;
+        }
+
+        return null;
+    }
+
+    function findOutsideReactionClone(selector, root = document) {
+        return queryAll(selector, root).find((element) => !element.closest('#ytc-reaction-clone')) || null;
+    }
+
+    function getButtonLabel(button) {
+        return normalizeText(
+            button.getAttribute('aria-label') ||
+            button.getAttribute('title') ||
+            button.textContent ||
+            ''
+        );
+    }
+
+    function findButtonByLabel(patterns, root = document) {
+        return queryAll('button', root)
+            .filter((button) => !button.closest('#ytc-reaction-clone'))
+            .find((button) => {
+                const label = getButtonLabel(button);
+                return patterns.some((pattern) => pattern.test(label));
+            }) || null;
+    }
+
+    function getOriginalReactionParts() {
+        const segmented = findOutsideReactionClone('segmented-like-dislike-button-view-model');
+        if (segmented) {
+            const buttons = queryAll('button', segmented);
+
+            if (buttons.length >= 2) {
+                return {
+                    source: segmented,
+                    insertBefore: segmented,
+                    hiddenNodes: [segmented],
+                    likeButton: buttons[0],
+                    dislikeButton: buttons[1]
+                };
+            }
+        }
+
+        const likeModel = findOutsideReactionClone('like-button-view-model');
+        const dislikeModel = findOutsideReactionClone('dislike-button-view-model');
+        const likeButton = likeModel ? findOutsideReactionClone('button', likeModel) : findButtonByLabel([/\blike\b/, /\bj'aime\b/]);
+        const dislikeButton = dislikeModel ? findOutsideReactionClone('button', dislikeModel) : findButtonByLabel([/\bdislike\b/, /\bje n'aime pas\b/]);
+
+        if (!likeButton || !dislikeButton) {
+            return null;
+        }
+
+        const likeNode = likeModel || likeButton;
+        const dislikeNode = dislikeModel || dislikeButton;
+        const commonHost =
+            likeNode.parentElement &&
+            likeNode.parentElement.contains(dislikeNode) &&
+            !['top-level-buttons-computed', 'actions-inner'].includes(likeNode.parentElement.id)
+                ? likeNode.parentElement
+                : null;
+
+        return {
+            source: commonHost || likeNode,
+            insertBefore: commonHost || likeNode,
+            hiddenNodes: commonHost ? [commonHost] : [likeNode, dislikeNode],
+            likeButton,
+            dislikeButton
+        };
+    }
+
+    function extractButtonCount(button) {
+        const directText = normalizeText(button.textContent || '');
+
+        if (directText && directText.length <= 12) {
+            return directText;
+        }
+
+        const ariaText = normalizeText(button.getAttribute('aria-label') || '');
+        const match = ariaText.match(/(\d+(?:[,.]\d+)?\s*(?:k|m|millions?|milliers?)?)/);
+
+        return match ? match[1].replace('.', ',') : '';
+    }
+
+    function clickOriginalButton(button) {
+        if (!button) return;
+
+        try {
+            button.click();
+            return;
+        } catch {
+            button.dispatchEvent(new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                view: window
+            }));
+        }
+    }
+
+    function createReactionIcon(type) {
+        const svg = createSvgElement('svg', {
+            viewBox: '0 0 24 24',
+            'aria-hidden': 'true',
+            focusable: 'false'
+        });
+
+        if (type === 'like') {
+            svg.appendChild(createSvgElement('path', {
+                d: 'M7 10v11'
+            }));
+            svg.appendChild(createSvgElement('path', {
+                d: 'M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h.5A2.5 2.5 0 0 1 15 5.88Z',
+                class: 'ytc-thumb-body'
+            }));
+            return svg;
+        }
+
+        svg.appendChild(createSvgElement('path', {
+            d: 'M17 14V3'
+        }));
+        svg.appendChild(createSvgElement('path', {
+            d: 'M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h-.5A2.5 2.5 0 0 1 9 18.12Z',
+            class: 'ytc-thumb-body'
+        }));
+
+        return svg;
+    }
+
+    function createReactionButton(type, text) {
+        const button = createNode('button', `ytc-reaction-button ytc-reaction-${type}`);
+        button.type = 'button';
+        button.dataset.action = type;
+        button.title = type === 'like' ? "J'aime ce contenu" : "Je n'aime pas ce contenu";
+        button.setAttribute('aria-label', button.title);
+        button.appendChild(createReactionIcon(type));
+
+        const count = createNode('span', type === 'like' ? 'ytc-like-count' : 'ytc-dislike-count', text);
+
+        if (type === 'dislike') {
+            count.id = 'ytc-dislikes';
+            count.setAttribute('role', 'status');
+            count.setAttribute('aria-live', 'polite');
+            count.title = 'Return YouTube Dislike';
+        }
+
+        button.appendChild(count);
+
+        return button;
+    }
+
+    function syncReactionCloneState(clone, parts) {
+        const likeCount = clone.querySelector('.ytc-like-count');
+        const likeText = extractButtonCount(parts.likeButton);
+        const localReaction = clone.dataset.localReaction || '';
+        const likePressed = localReaction
+            ? localReaction === 'like'
+            : parts.likeButton.getAttribute('aria-pressed') === 'true';
+        const dislikePressed = localReaction
+            ? localReaction === 'dislike'
+            : parts.dislikeButton.getAttribute('aria-pressed') === 'true';
+
+        if (likeCount && likeText) {
+            setTextWithCountAnimation(likeCount, likeText);
+        }
+
+        clone.querySelector('[data-action="like"]')?.setAttribute('aria-pressed', likePressed ? 'true' : 'false');
+        clone.querySelector('[data-action="dislike"]')?.setAttribute('aria-pressed', dislikePressed ? 'true' : 'false');
+    }
+
+    function animateCountChange(node) {
+        if (!node) return;
+
+        node.classList.remove('ytc-count-updated');
+        void node.offsetWidth;
+        node.classList.add('ytc-count-updated');
+
+        window.setTimeout(() => {
+            node.classList.remove('ytc-count-updated');
+        }, 360);
+    }
+
+    function setTextWithCountAnimation(node, text) {
+        if (!node) return;
+
+        if (node.textContent && node.textContent !== text) {
+            animateCountChange(node);
+        }
+
+        node.textContent = text;
+    }
+
+    function setDislikeCount(badge, count, options = {}) {
+        const safeCount = Math.max(0, Math.round(Number(count) || 0));
+        const text = formatCompactNumber(safeCount);
+        badge.dataset.rawCount = String(safeCount);
+        badge.dataset.state = 'ready';
+        setTextWithCountAnimation(badge, text);
+
+        const videoId = getCurrentVideoId();
+        if (videoId && options.updateCache !== false) {
+            dislikeCache.set(videoId, {
+                count: safeCount,
+                fetchedAt: options.fetchedAt || Date.now()
+            });
+        }
+    }
+
+    function animateReaction(button, becomesActive) {
+        if (!button) return;
+
+        button.classList.remove('ytc-reaction-pop', 'ytc-reaction-burst');
+        void button.offsetWidth;
+        button.classList.add('ytc-reaction-pop');
+
+        if (becomesActive) {
+            button.classList.add('ytc-reaction-burst');
+        }
+
+        window.setTimeout(() => {
+            button.classList.remove('ytc-reaction-pop', 'ytc-reaction-burst');
+        }, 620);
+    }
+
+    function updateOptimisticReaction(clone, action) {
+        const likeButton = clone.querySelector('[data-action="like"]');
+        const dislikeButton = clone.querySelector('[data-action="dislike"]');
+        const badge = clone.querySelector('#ytc-dislikes');
+        const wasLiked = likeButton?.getAttribute('aria-pressed') === 'true';
+        const wasDisliked = dislikeButton?.getAttribute('aria-pressed') === 'true';
+
+        let nextLiked = wasLiked;
+        let nextDisliked = wasDisliked;
+
+        if (action === 'like') {
+            nextLiked = !wasLiked;
+            nextDisliked = false;
+        } else {
+            nextDisliked = !wasDisliked;
+            nextLiked = false;
+        }
+
+        likeButton?.setAttribute('aria-pressed', nextLiked ? 'true' : 'false');
+        dislikeButton?.setAttribute('aria-pressed', nextDisliked ? 'true' : 'false');
+        clone.dataset.localReaction = nextLiked ? 'like' : nextDisliked ? 'dislike' : 'none';
+
+        if (badge) {
+            const rawCount = Number(badge.dataset.rawCount);
+            const parsedCount = Number.isFinite(rawCount) ? rawCount : parseCompactNumber(badge.textContent || '');
+
+            if (Number.isFinite(parsedCount)) {
+                let nextCount = parsedCount;
+
+                if (action === 'dislike') {
+                    nextCount += nextDisliked ? 1 : -1;
+                } else if (wasDisliked) {
+                    nextCount -= 1;
+                }
+
+                setDislikeCount(badge, nextCount);
+            }
+        }
+
+        animateReaction(action === 'like' ? likeButton : dislikeButton, action === 'like' ? nextLiked : nextDisliked);
+    }
+
+    function createReactionClone(parts) {
+        removeDislikeBadge();
+
+        if (!parts.source.dataset.ytcReactionSourceId) {
+            reactionSourceId += 1;
+            parts.source.dataset.ytcReactionSourceId = String(reactionSourceId);
+        }
+
+        const cloneWrap = createNode('div', 'ytc-reaction-clone');
+        cloneWrap.id = 'ytc-reaction-clone';
+        cloneWrap.dataset.sourceId = parts.source.dataset.ytcReactionSourceId;
+        cloneWrap.title = 'YouTube Cleaner like/dislike count';
+
+        const likeButton = createReactionButton('like', extractButtonCount(parts.likeButton));
+        const separator = createNode('span', 'ytc-reaction-separator');
+        const dislikeButton = createReactionButton('dislike', '...');
+
+        likeButton.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            updateOptimisticReaction(cloneWrap, 'like');
+            clickOriginalButton(parts.likeButton);
+            setTimeout(scheduleCleanup, 150);
+        });
+
+        dislikeButton.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            updateOptimisticReaction(cloneWrap, 'dislike');
+            clickOriginalButton(parts.dislikeButton);
+            setTimeout(scheduleCleanup, 150);
+        });
+
+        cloneWrap.appendChild(likeButton);
+        cloneWrap.appendChild(separator);
+        cloneWrap.appendChild(dislikeButton);
+
+        parts.insertBefore.parentElement.insertBefore(cloneWrap, parts.insertBefore);
+        parts.hiddenNodes.forEach((node) => {
+            node.classList.add('ytc-reaction-original-hidden');
+        });
+
+        syncReactionCloneState(cloneWrap, parts);
+
+        return cloneWrap;
+    }
+
+    function ensureReactionClone() {
+        const parts = getOriginalReactionParts();
+        if (!parts || !parts.insertBefore.parentElement) return null;
+
+        const existing = document.getElementById('ytc-reaction-clone');
+        const sourceId = parts.source.dataset.ytcReactionSourceId;
+
+        if (
+            existing &&
+            sourceId &&
+            existing.dataset.sourceId === sourceId &&
+            parts.hiddenNodes.every((node) => node.classList.contains('ytc-reaction-original-hidden'))
+        ) {
+            syncReactionCloneState(existing, parts);
+            return existing;
+        }
+
+        return createReactionClone(parts);
+    }
+
+    function ensureDislikeCountNode(clone) {
+        return clone.querySelector('#ytc-dislikes');
+    }
+
+    function removeDislikeBadge() {
+        const clone = document.getElementById('ytc-reaction-clone');
+        if (clone) {
+            clone.remove();
+        }
+
+        queryAll('.ytc-reaction-original-hidden').forEach((element) => {
+            element.classList.remove('ytc-reaction-original-hidden');
+        });
+
+        currentDislikeVideoId = '';
+    }
+
+    function setDislikeBadgeState(badge, state, text) {
+        if (!badge) return;
+
+        badge.dataset.state = state;
+        badge.textContent = text;
+    }
+
+    function updateDislikeDisplay(forceRefresh = false) {
+        if (!settings.enabled || !settings.showDislikes || !isWatchPage()) {
+            removeDislikeBadge();
+            return;
+        }
+
+        const videoId = getCurrentVideoId();
+        if (!videoId) {
+            removeDislikeBadge();
+            return;
+        }
+
+        const reactionClone = ensureReactionClone();
+        if (!reactionClone) return;
+
+        const badge = ensureDislikeCountNode(reactionClone);
+        if (!badge) return;
+
+        const cachedDislikes = readCachedDislikeCount(videoId);
+        const shouldUseCache =
+            cachedDislikes &&
+            !forceRefresh &&
+            Date.now() - cachedDislikes.fetchedAt < 60000;
+
+        if (shouldUseCache) {
+            currentDislikeVideoId = videoId;
+            badge.dataset.videoId = videoId;
+            setDislikeCount(badge, cachedDislikes.count, {
+                fetchedAt: cachedDislikes.fetchedAt
+            });
+            return;
+        }
+
+        if (
+            !forceRefresh &&
+            currentDislikeVideoId === videoId &&
+            (badge.dataset.state === 'loading' || badge.dataset.state === 'error')
+        ) {
+            return;
+        }
+
+        currentDislikeVideoId = videoId;
+        badge.dataset.videoId = videoId;
+        setDislikeBadgeState(badge, 'loading', '...');
+
+        const requestId = ++currentDislikeRequestId;
+
+        fetchDislikeCount(videoId)
+            .then((count) => {
+                dislikeCache.set(videoId, {
+                    count,
+                    fetchedAt: Date.now()
+                });
+
+                if (
+                    requestId !== currentDislikeRequestId ||
+                    !settings.enabled ||
+                    !settings.showDislikes ||
+                    getCurrentVideoId() !== videoId
+                ) {
+                    return;
+                }
+
+                setDislikeCount(badge, count);
+            })
+            .catch(() => {
+                if (requestId !== currentDislikeRequestId || getCurrentVideoId() !== videoId) {
+                    return;
+                }
+
+                setDislikeBadgeState(badge, 'error', 'n/a');
+            });
+    }
+
+    function refreshReactionCounters() {
+        if (!settings.enabled || !settings.showDislikes || !isWatchPage()) return;
+
+        const clone = document.getElementById('ytc-reaction-clone');
+        const parts = getOriginalReactionParts();
+
+        if (clone && parts) {
+            syncReactionCloneState(clone, parts);
+        }
+
+        if (Date.now() - lastDislikeRefreshAt >= 60000) {
+            lastDislikeRefreshAt = Date.now();
+            updateDislikeDisplay(true);
+        }
+    }
+
     function cleanPage() {
         redirectShortsPage();
 
         if (!settings.enabled) {
             unhideElements();
+            removeDislikeBadge();
             return;
         }
 
         hideShorts();
         hideSubscriptionSections();
+        updateDislikeDisplay();
     }
 
     function scheduleCleanup() {
@@ -225,13 +810,17 @@
         const root = document.documentElement;
 
         root.dataset.ytcEnabled = settings.enabled ? 'true' : 'false';
-        root.dataset.ytcColumns = settings.enabled ? settings.columns : 'off';
+        root.dataset.ytcHideShorts = settings.enabled && settings.hideShorts ? 'true' : 'false';
+        root.dataset.ytcColumns =
+            settings.enabled && !settings.automaticColumns ? settings.columns : 'auto';
 
         updateButtonState();
         updateMenuState();
 
-        if (!settings.enabled) {
-            unhideElements();
+        unhideElements();
+
+        if (!settings.enabled || !settings.showDislikes) {
+            removeDislikeBadge();
         }
 
         scheduleCleanup();
@@ -243,25 +832,140 @@
                 display: none !important;
             }
 
-            html[data-ytc-enabled="true"] ytd-reel-shelf-renderer,
-            html[data-ytc-enabled="true"] ytd-rich-shelf-renderer[is-shorts],
-            html[data-ytc-enabled="true"] ytd-rich-section-renderer:has(ytd-rich-shelf-renderer[is-shorts]),
-            html[data-ytc-enabled="true"] ytd-guide-entry-renderer:has(a[href="/shorts"]),
-            html[data-ytc-enabled="true"] ytd-guide-entry-renderer:has(a[href^="/shorts"]),
-            html[data-ytc-enabled="true"] ytd-mini-guide-entry-renderer:has(a[href="/shorts"]),
-            html[data-ytc-enabled="true"] ytd-mini-guide-entry-renderer:has(a[href^="/shorts"]),
-            html[data-ytc-enabled="true"] ytd-guide-entry-renderer:has(a[title="Shorts"]),
-            html[data-ytc-enabled="true"] ytd-mini-guide-entry-renderer:has(a[title="Shorts"]),
-            html[data-ytc-enabled="true"] yt-tab-shape[tab-title="Shorts"] {
+            .ytc-reaction-original-hidden {
                 display: none !important;
             }
 
+            #ytc-reaction-clone {
+                display: inline-flex;
+                align-items: center;
+                height: 40px;
+                border-radius: 20px;
+                overflow: hidden;
+                background: rgba(0, 0, 0, .05);
+                color: #0f0f0f;
+                font-family: Roboto, Arial, sans-serif;
+                vertical-align: middle;
+            }
+
+            html[dark] #ytc-reaction-clone {
+                background: rgba(255, 255, 255, .10);
+                color: #f1f1f1;
+            }
+
+            .ytc-reaction-button {
+                height: 40px;
+                min-width: 62px;
+                border: 0;
+                background: transparent;
+                color: inherit;
+                cursor: pointer !important;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 8px;
+                padding: 0 14px;
+                margin: 0;
+                font: inherit;
+                font-size: 14px;
+                font-weight: 500;
+                line-height: 1;
+                overflow: visible;
+                position: relative;
+            }
+
+            .ytc-reaction-button::before {
+                content: "";
+                position: absolute;
+                inset: -8px -4px;
+                border-radius: 999px;
+                opacity: 0;
+                pointer-events: none;
+                transform: scale(.55);
+                background:
+                    radial-gradient(circle at 18% 42%, #ff2f6d 0 2px, transparent 3px),
+                    radial-gradient(circle at 30% 20%, #ffcf3f 0 2px, transparent 3px),
+                    radial-gradient(circle at 50% 14%, #3ea6ff 0 2px, transparent 3px),
+                    radial-gradient(circle at 70% 22%, #ff2f6d 0 2px, transparent 3px),
+                    radial-gradient(circle at 82% 46%, #3ea6ff 0 2px, transparent 3px),
+                    radial-gradient(circle at 64% 78%, #ffcf3f 0 2px, transparent 3px),
+                    radial-gradient(circle at 35% 80%, #3ea6ff 0 2px, transparent 3px);
+            }
+
+            .ytc-reaction-button:hover {
+                background: rgba(0, 0, 0, .08);
+            }
+
+            html[dark] .ytc-reaction-button:hover {
+                background: rgba(255, 255, 255, .10);
+            }
+
+            .ytc-reaction-button[aria-pressed="true"] {
+                color: #3ea6ff;
+            }
+
+            .ytc-reaction-button.ytc-reaction-pop svg {
+                animation: ytc-reaction-pop .28s cubic-bezier(.2, 1.45, .35, 1);
+            }
+
+            .ytc-reaction-button.ytc-reaction-burst::before {
+                animation: ytc-reaction-burst .48s ease-out;
+            }
+
+            .ytc-reaction-button svg {
+                width: 22px;
+                height: 22px;
+                fill: none;
+                stroke: currentColor;
+                stroke-width: 2;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+                flex: 0 0 auto;
+            }
+
+            .ytc-reaction-button .ytc-thumb-body {
+                fill: transparent;
+                transition: fill .12s ease, transform .12s ease;
+            }
+
+            .ytc-reaction-button[aria-pressed="true"] .ytc-thumb-body {
+                fill: currentColor;
+            }
+
+            .ytc-reaction-separator {
+                width: 1px;
+                height: 20px;
+                background: rgba(0, 0, 0, .12);
+                flex: 0 0 auto;
+            }
+
+            html[dark] .ytc-reaction-separator {
+                background: rgba(255, 255, 255, .16);
+            }
+
+            html[data-ytc-hide-shorts="true"] ytd-reel-shelf-renderer,
+            html[data-ytc-hide-shorts="true"] ytd-rich-shelf-renderer[is-shorts],
+            html[data-ytc-hide-shorts="true"] ytd-rich-section-renderer:has(ytd-rich-shelf-renderer[is-shorts]),
+            html[data-ytc-hide-shorts="true"] ytd-guide-entry-renderer:has(a[href="/shorts"]),
+            html[data-ytc-hide-shorts="true"] ytd-guide-entry-renderer:has(a[href^="/shorts"]),
+            html[data-ytc-hide-shorts="true"] ytd-mini-guide-entry-renderer:has(a[href="/shorts"]),
+            html[data-ytc-hide-shorts="true"] ytd-mini-guide-entry-renderer:has(a[href^="/shorts"]),
+            html[data-ytc-hide-shorts="true"] ytd-guide-entry-renderer:has(a[title="Shorts"]),
+            html[data-ytc-hide-shorts="true"] ytd-mini-guide-entry-renderer:has(a[title="Shorts"]),
+            html[data-ytc-hide-shorts="true"] yt-tab-shape[tab-title="Shorts"] {
+                display: none !important;
+            }
+
+            html[data-ytc-columns="1"] { --ytc-columns: 1; }
+            html[data-ytc-columns="2"] { --ytc-columns: 2; }
             html[data-ytc-columns="3"] { --ytc-columns: 3; }
             html[data-ytc-columns="4"] { --ytc-columns: 4; }
             html[data-ytc-columns="5"] { --ytc-columns: 5; }
             html[data-ytc-columns="6"] { --ytc-columns: 6; }
+            html[data-ytc-columns="7"] { --ytc-columns: 7; }
+            html[data-ytc-columns="8"] { --ytc-columns: 8; }
 
-            html[data-ytc-enabled="true"] ytd-rich-grid-renderer {
+            html[data-ytc-enabled="true"]:not([data-ytc-columns="auto"]) ytd-rich-grid-renderer {
                 --ytd-rich-grid-items-per-row: var(--ytc-columns) !important;
                 --ytd-rich-grid-posts-per-row: var(--ytc-columns) !important;
                 --ytd-rich-grid-slim-items-per-row: var(--ytc-columns) !important;
@@ -271,8 +975,8 @@
                 --ytd-rich-grid-item-min-width: 0 !important;
             }
 
-            html[data-ytc-enabled="true"] ytd-rich-grid-renderer #contents > ytd-rich-item-renderer,
-            html[data-ytc-enabled="true"] ytd-rich-grid-row #contents > ytd-rich-item-renderer {
+            html[data-ytc-enabled="true"]:not([data-ytc-columns="auto"]) ytd-rich-grid-renderer #contents > ytd-rich-item-renderer,
+            html[data-ytc-enabled="true"]:not([data-ytc-columns="auto"]) ytd-rich-grid-row #contents > ytd-rich-item-renderer {
                 width: calc((100% / var(--ytc-columns)) - 16px) !important;
                 max-width: none !important;
                 min-width: 0 !important;
@@ -326,7 +1030,15 @@
                 width: 24px;
                 height: 24px;
                 display: block;
-                fill: currentColor;
+                fill: none;
+                stroke: currentColor;
+                stroke-width: 2;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+                pointer-events: none;
+            }
+
+            #ytc-button svg * {
                 pointer-events: none;
             }
 
@@ -335,7 +1047,10 @@
                 top: 58px;
                 right: 12px;
                 z-index: 2147483647;
-                width: 282px;
+                width: 320px;
+                max-width: calc(100vw - 24px);
+                max-height: calc(100vh - 24px);
+                overflow-y: auto;
                 padding: 12px;
                 border-radius: 12px;
                 background: #ffffff !important;
@@ -370,7 +1085,31 @@
             .ytc-title {
                 font-size: 15px;
                 font-weight: 600;
-                margin-bottom: 10px;
+                margin-bottom: 12px;
+                color: inherit;
+            }
+
+            .ytc-section {
+                padding: 10px 0;
+                border-top: 1px solid rgba(0, 0, 0, .10);
+            }
+
+            html[dark] .ytc-section {
+                border-top-color: rgba(255, 255, 255, .12);
+            }
+
+            .ytc-title + .ytc-section {
+                border-top: 0;
+                padding-top: 0;
+            }
+
+            .ytc-section-title {
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0;
+                text-transform: uppercase;
+                opacity: .68;
+                margin-bottom: 4px;
                 color: inherit;
             }
 
@@ -379,7 +1118,11 @@
                 align-items: center;
                 justify-content: space-between;
                 gap: 12px;
-                margin: 10px 0;
+                margin: 8px 0;
+            }
+
+            .ytc-row > div:first-child {
+                min-width: 0;
             }
 
             .ytc-label {
@@ -437,42 +1180,101 @@
                 background: #ffffff;
             }
 
-            .ytc-options {
-                display: grid;
-                grid-template-columns: repeat(4, 1fr);
-                gap: 6px;
-                margin-top: 8px;
+            #ytc-menu .ytc-switch:disabled {
+                cursor: not-allowed;
+                opacity: .45;
             }
 
-            .ytc-option {
-                border: 1px solid rgba(0, 0, 0, .16);
-                background: transparent;
-                color: inherit;
-                border-radius: 8px;
-                padding: 7px 0;
-                cursor: pointer;
+            .ytc-slider-wrap {
+                margin: 10px 0 2px;
+            }
+
+            .ytc-slider-head {
+                display: flex;
+                align-items: baseline;
+                justify-content: space-between;
+                gap: 12px;
+                margin-bottom: 8px;
+            }
+
+            .ytc-slider-value {
                 font-size: 12px;
-                font-family: Roboto, Arial, sans-serif;
-            }
-
-            html[dark] .ytc-option {
-                border-color: rgba(255, 255, 255, .16);
-            }
-
-            .ytc-option:hover {
-                background: rgba(0, 0, 0, .06);
-            }
-
-            html[dark] .ytc-option:hover {
-                background: rgba(255, 255, 255, .10);
-            }
-
-            .ytc-option[data-active="true"] {
-                border-color: #3ea6ff;
+                font-weight: 700;
                 color: #3ea6ff;
-                background: rgba(62, 166, 255, .12);
-                font-weight: 600;
+                white-space: nowrap;
             }
+
+            .ytc-slider {
+                width: 100%;
+                accent-color: #3ea6ff;
+            }
+
+            .ytc-slider:disabled {
+                cursor: not-allowed;
+                opacity: .45;
+            }
+
+            .ytc-slider-scale {
+                display: flex;
+                justify-content: space-between;
+                margin-top: 2px;
+                font-size: 11px;
+                opacity: .65;
+            }
+
+            .ytc-like-count,
+            .ytc-dislike-count {
+                display: inline-flex;
+                align-items: center;
+                font-weight: 700;
+                font-size: 13px;
+                line-height: 1;
+                color: inherit;
+                pointer-events: none;
+                white-space: nowrap;
+            }
+
+            .ytc-count-updated {
+                animation: ytc-count-updated .26s ease-out;
+            }
+
+            @keyframes ytc-reaction-pop {
+                0% {
+                    transform: scale(.72) rotate(-6deg);
+                }
+                58% {
+                    transform: scale(1.22) rotate(4deg);
+                }
+                100% {
+                    transform: scale(1) rotate(0);
+                }
+            }
+
+            @keyframes ytc-reaction-burst {
+                0% {
+                    opacity: 0;
+                    transform: scale(.45);
+                }
+                18% {
+                    opacity: 1;
+                }
+                100% {
+                    opacity: 0;
+                    transform: scale(1.24);
+                }
+            }
+
+            @keyframes ytc-count-updated {
+                0% {
+                    transform: translateY(6px);
+                    opacity: .35;
+                }
+                100% {
+                    transform: translateY(0);
+                    opacity: 1;
+                }
+            }
+
         `;
 
         if (typeof GM_addStyle === 'function') {
@@ -499,23 +1301,57 @@
         return node;
     }
 
-    function createTuneIcon() {
+    function createSvgElement(tag, attrs = {}) {
         const namespace = 'http://www.w3.org/2000/svg';
+        const node = document.createElementNS(namespace, tag);
 
-        const svg = document.createElementNS(namespace, 'svg');
-        svg.setAttribute('viewBox', '0 0 24 24');
-        svg.setAttribute('aria-hidden', 'true');
-        svg.setAttribute('focusable', 'false');
+        Object.entries(attrs).forEach(([key, value]) => {
+            node.setAttribute(key, value);
+        });
 
-        const path = document.createElementNS(namespace, 'path');
-        path.setAttribute(
-            'd',
-            'M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z'
-        );
+        return node;
+    }
 
-        svg.appendChild(path);
+    function createCleanerIcon() {
+        const svg = createSvgElement('svg', {
+            viewBox: '0 0 24 24',
+            fill: 'none',
+            stroke: 'currentColor',
+            'stroke-width': '2',
+            'stroke-linecap': 'round',
+            'stroke-linejoin': 'round',
+            class: 'lucide lucide-brush-cleaning-icon lucide-brush-cleaning',
+            'aria-hidden': 'true',
+            focusable: 'false'
+        });
+
+        svg.appendChild(createSvgElement('path', {
+            d: 'm16 22-1-4'
+        }));
+        svg.appendChild(createSvgElement('path', {
+            d: 'M19 14a1 1 0 0 0 1-1v-1a2 2 0 0 0-2-2h-3a1 1 0 0 1-1-1V4a2 2 0 0 0-4 0v5a1 1 0 0 1-1 1H6a2 2 0 0 0-2 2v1a1 1 0 0 0 1 1'
+        }));
+        svg.appendChild(createSvgElement('path', {
+            d: 'M19 14H5l-1.973 6.767A1 1 0 0 0 4 22h16a1 1 0 0 0 .973-1.233z'
+        }));
+        svg.appendChild(createSvgElement('path', {
+            d: 'm8 22 1-4'
+        }));
 
         return svg;
+    }
+
+    function createSection(title, ...children) {
+        const section = createNode('div', 'ytc-section');
+        section.appendChild(createNode('div', 'ytc-section-title', title));
+
+        children.forEach((child) => {
+            if (child) {
+                section.appendChild(child);
+            }
+        });
+
+        return section;
     }
 
     function createSwitchRow(title, help, settingKey) {
@@ -544,24 +1380,52 @@
         return row;
     }
 
-    function createGridOptions() {
-        const options = createNode('div', 'ytc-options');
+    function createColumnSlider() {
+        const wrap = createNode('div', 'ytc-slider-wrap');
+        const head = createNode('div', 'ytc-slider-head');
+        const label = createNode('div', 'ytc-label', 'Manual columns');
+        const value = createNode('div', 'ytc-slider-value');
+        value.id = 'ytc-column-value';
 
-        VALID_COLUMNS.forEach((value) => {
-            const button = createNode('button', 'ytc-option', value);
-            button.type = 'button';
-            button.dataset.columns = value;
+        const slider = createNode('input', 'ytc-slider');
+        slider.id = 'ytc-column-slider';
+        slider.type = 'range';
+        slider.min = '1';
+        slider.max = '8';
+        slider.step = '1';
+        slider.value = settings.columns;
 
-            button.addEventListener('click', (event) => {
-                event.stopPropagation();
-                settings.columns = value;
-                saveSettings();
-            });
+        slider.addEventListener('input', (event) => {
+            event.stopPropagation();
+            if (!(event.target instanceof HTMLInputElement)) return;
 
-            options.appendChild(button);
+            const nextValue = event.target.value;
+            if (!VALID_COLUMNS.includes(nextValue)) return;
+
+            settings.columns = nextValue;
+            settings.automaticColumns = false;
+            saveSettings();
         });
 
-        return options;
+        const scale = createNode('div', 'ytc-slider-scale');
+        scale.appendChild(createNode('span', null, '1'));
+        scale.appendChild(createNode('span', null, '8'));
+
+        head.appendChild(label);
+        head.appendChild(value);
+        wrap.appendChild(head);
+        wrap.appendChild(slider);
+        wrap.appendChild(scale);
+
+        return wrap;
+    }
+
+    function createColumnsAutoRow() {
+        return createSwitchRow(
+            'Automatic grid',
+            'Use YouTube default responsive columns',
+            'automaticColumns'
+        );
     }
 
     function ensureButton() {
@@ -583,7 +1447,7 @@
         button.type = 'button';
         button.title = 'YouTube Cleaner';
         button.setAttribute('aria-label', 'YouTube Cleaner');
-        button.appendChild(createTuneIcon());
+        button.appendChild(createCleanerIcon());
 
         button.addEventListener('click', (event) => {
             event.preventDefault();
@@ -617,28 +1481,59 @@
 
         const title = createNode('div', 'ytc-title', 'YouTube Cleaner');
 
-        const cleanerRow = createSwitchRow(
-            'Cleaner',
-            'Hide Shorts and unwanted sections',
-            'enabled'
+        const generalSection = createSection(
+            'General',
+            createSwitchRow(
+                'Cleaner',
+                'Master switch for all cleanup features',
+                'enabled'
+            )
         );
 
-        const redirectRow = createSwitchRow(
-            'Redirect Shorts pages',
-            'Send /shorts/ links to Subscriptions',
-            'redirectShorts'
+        const shortsSection = createSection(
+            'Shorts',
+            createSwitchRow(
+                'Hide Shorts',
+                'Remove Shorts from feeds and navigation',
+                'hideShorts'
+            ),
+            createSwitchRow(
+                'Redirect Shorts pages',
+                'Send /shorts/ links back to the homepage',
+                'redirectShorts'
+            )
         );
 
-        const gridLabel = createNode('div', 'ytc-label', 'Grid columns');
-        gridLabel.style.marginTop = '12px';
+        const subscriptionsSection = createSection(
+            'Subscriptions',
+            createSwitchRow(
+                'Hide noisy sections',
+                'Remove recommended and most relevant blocks',
+                'hideSubscriptionSections'
+            )
+        );
 
-        const gridOptions = createGridOptions();
+        const layoutSection = createSection(
+            'Layout',
+            createColumnsAutoRow(),
+            createColumnSlider()
+        );
+
+        const extrasSection = createSection(
+            'Extras',
+            createSwitchRow(
+                'Show dislikes',
+                'Display Return YouTube Dislike counts on watch pages',
+                'showDislikes'
+            )
+        );
 
         menu.appendChild(title);
-        menu.appendChild(cleanerRow);
-        menu.appendChild(redirectRow);
-        menu.appendChild(gridLabel);
-        menu.appendChild(gridOptions);
+        menu.appendChild(generalSection);
+        menu.appendChild(shortsSection);
+        menu.appendChild(subscriptionsSection);
+        menu.appendChild(layoutSection);
+        menu.appendChild(extrasSection);
 
         document.body.appendChild(menu);
 
@@ -711,22 +1606,25 @@
         const menu = document.getElementById('ytc-menu');
         if (!menu) return;
 
-        const enabledSwitch = menu.querySelector('[data-setting="enabled"]');
-        const redirectSwitch = menu.querySelector('[data-setting="redirectShorts"]');
+        menu.querySelectorAll('.ytc-switch[data-setting]').forEach((button) => {
+            const settingKey = button.dataset.setting;
+            const isActive = Boolean(settings[settingKey]);
 
-        if (enabledSwitch) {
-            enabledSwitch.dataset.active = settings.enabled ? 'true' : 'false';
-            enabledSwitch.setAttribute('aria-pressed', settings.enabled ? 'true' : 'false');
-        }
-
-        if (redirectSwitch) {
-            redirectSwitch.dataset.active = settings.redirectShorts ? 'true' : 'false';
-            redirectSwitch.setAttribute('aria-pressed', settings.redirectShorts ? 'true' : 'false');
-        }
-
-        menu.querySelectorAll('.ytc-option').forEach((option) => {
-            option.dataset.active = option.dataset.columns === settings.columns ? 'true' : 'false';
+            button.dataset.active = isActive ? 'true' : 'false';
+            button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
         });
+
+        const slider = menu.querySelector('#ytc-column-slider');
+        const value = menu.querySelector('#ytc-column-value');
+
+        if (slider) {
+            slider.value = settings.columns;
+            slider.disabled = settings.automaticColumns;
+        }
+
+        if (value) {
+            value.textContent = settings.automaticColumns ? 'Auto' : `${settings.columns} per row`;
+        }
     }
 
     function start() {
@@ -753,6 +1651,7 @@
         document.addEventListener('DOMContentLoaded', scheduleCleanup);
 
         setInterval(scheduleCleanup, 2000);
+        setInterval(refreshReactionCounters, 60000);
     }
 
     start();
