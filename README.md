@@ -12,7 +12,8 @@ More control over the desktop grid.
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-Userscript-00485B?style=for-the-badge)](https://www.tampermonkey.net/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](./LICENSE)
 
-[Install YouTube Cleaner](https://raw.githubusercontent.com/Tkremre/ytcleaner/main/YouTube-Cleaner.user.js)
+[Install from GitHub](https://raw.githubusercontent.com/Tkremre/ytcleaner/main/YouTube-Cleaner.user.js)
+[Install from Greasy Fork](https://greasyfork.org/fr/scripts/585208-youtube-cleaner-hide-shorts-clean-layout)
 
 </div>
 
