@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Cleaner
 // @namespace    https://github.com/Tkremre/ytcleaner
-// @version      1.0.1
+// @version      1.0.2
 // @description  Bring back a cleaner old-school YouTube desktop layout.
 // @author       Tkremre
 // @match        https://www.youtube.com/*
@@ -67,7 +67,6 @@
     let started = false;
     let currentDislikeVideoId = '';
     let currentDislikeRequestId = 0;
-    let reactionSourceId = 0;
     let lastDislikeRefreshAt = 0;
     const dislikeCache = new Map();
 
@@ -257,26 +256,52 @@
             return '0';
         }
 
-        try {
-            return new Intl.NumberFormat(navigator.language || 'en', {
-                notation: 'compact',
-                maximumFractionDigits: 1
-            }).format(number);
-        } catch {
-            return Math.round(number).toLocaleString();
+        const absolute = Math.abs(number);
+        const locale = navigator.language || 'en';
+
+        if (absolute >= 1000000) {
+            return formatTruncatedCompactNumber(number, 1000000, 'M', locale);
         }
+
+        if (absolute >= 1000) {
+            return formatTruncatedCompactNumber(number, 1000, 'k', locale);
+        }
+
+        return Math.floor(number).toLocaleString(locale);
     }
 
-    function parseCompactNumber(value) {
-        const text = normalizeText(value)
-            .replace(/\s+/g, '')
-            .replace(',', '.');
-        const match = text.match(/^(\d+(?:\.\d+)?)(k|m)?$/);
+    function formatTruncatedCompactNumber(value, divisor, suffix, locale) {
+        const truncated = Math.trunc((value / divisor) * 10) / 10;
+        const formatted = new Intl.NumberFormat(locale, {
+            minimumFractionDigits: 0,
+            maximumFractionDigits: 1
+        }).format(truncated);
 
-        if (!match) return NaN;
+        return `${formatted} ${suffix}`;
+    }
 
-        const multiplier = match[2] === 'm' ? 1000000 : match[2] === 'k' ? 1000 : 1;
-        return Number(match[1]) * multiplier;
+    function parseCountNumber(value) {
+        const text = normalizeText(value);
+        if (!text) return NaN;
+
+        const groupedMatch = text.match(/\b(\d{1,3}(?:[\s.,]\d{3})+)\b/);
+
+        if (groupedMatch) {
+            return Number(groupedMatch[1].replace(/[^\d]/g, ''));
+        }
+
+        const compactMatch = text.match(/(\d+(?:[,.]\d+)?)(?:\s*)(k|m|millions?|million|milliers?|mille)\b/);
+
+        if (compactMatch) {
+            const number = Number(compactMatch[1].replace(',', '.'));
+            const suffix = compactMatch[2] || '';
+            const multiplier = /^m(?:illion)?s?$/.test(suffix) ? 1000000 : 1000;
+            return number * multiplier;
+        }
+
+        const integerMatch = text.match(/\b\d+\b/);
+
+        return integerMatch ? Number(integerMatch[0]) : NaN;
     }
 
     function requestJson(url) {
@@ -329,18 +354,25 @@
         const cached = dislikeCache.get(videoId);
 
         if (typeof cached === 'number') {
-            return { count: cached, fetchedAt: 0 };
+            return { dislikes: cached, fetchedAt: 0 };
+        }
+
+        if (cached && Number.isFinite(cached.dislikes)) {
+            return cached;
         }
 
         if (cached && Number.isFinite(cached.count)) {
-            return cached;
+            return {
+                dislikes: cached.count,
+                fetchedAt: cached.fetchedAt || 0
+            };
         }
 
         return null;
     }
 
-    function findOutsideReactionClone(selector, root = document) {
-        return queryAll(selector, root).find((element) => !element.closest('#ytc-reaction-clone')) || null;
+    function findElement(selector, root = document) {
+        return queryAll(selector, root)[0] || null;
     }
 
     function getButtonLabel(button) {
@@ -354,7 +386,6 @@
 
     function findButtonByLabel(patterns, root = document) {
         return queryAll('button', root)
-            .filter((button) => !button.closest('#ytc-reaction-clone'))
             .find((button) => {
                 const label = getButtonLabel(button);
                 return patterns.some((pattern) => pattern.test(label));
@@ -362,322 +393,222 @@
     }
 
     function getOriginalReactionParts() {
-        const segmented = findOutsideReactionClone('segmented-like-dislike-button-view-model');
+        const segmented = findElement('segmented-like-dislike-button-view-model');
         if (segmented) {
             const buttons = queryAll('button', segmented);
 
             if (buttons.length >= 2) {
                 return {
-                    source: segmented,
-                    insertBefore: segmented,
-                    hiddenNodes: [segmented],
-                    likeButton: buttons[0],
                     dislikeButton: buttons[1]
                 };
             }
         }
 
-        const likeModel = findOutsideReactionClone('like-button-view-model');
-        const dislikeModel = findOutsideReactionClone('dislike-button-view-model');
-        const likeButton = likeModel ? findOutsideReactionClone('button', likeModel) : findButtonByLabel([/\blike\b/, /\bj'aime\b/]);
-        const dislikeButton = dislikeModel ? findOutsideReactionClone('button', dislikeModel) : findButtonByLabel([/\bdislike\b/, /\bje n'aime pas\b/]);
+        const dislikeModel = findElement('dislike-button-view-model');
+        const dislikeButton = dislikeModel ? findElement('button', dislikeModel) : findButtonByLabel([/\bdislike\b/, /\bje n'aime pas\b/]);
 
-        if (!likeButton || !dislikeButton) {
+        if (!dislikeButton) {
             return null;
         }
 
-        const likeNode = likeModel || likeButton;
-        const dislikeNode = dislikeModel || dislikeButton;
-        const commonHost =
-            likeNode.parentElement &&
-            likeNode.parentElement.contains(dislikeNode) &&
-            !['top-level-buttons-computed', 'actions-inner'].includes(likeNode.parentElement.id)
-                ? likeNode.parentElement
-                : null;
-
         return {
-            source: commonHost || likeNode,
-            insertBefore: commonHost || likeNode,
-            hiddenNodes: commonHost ? [commonHost] : [likeNode, dislikeNode],
-            likeButton,
             dislikeButton
         };
     }
 
-    function extractButtonCount(button) {
-        const directText = normalizeText(button.textContent || '');
+    function getDirectChildWithin(parent, descendant) {
+        let node = descendant;
 
-        if (directText && directText.length <= 12) {
-            return directText;
+        while (node && node.parentElement && node.parentElement !== parent) {
+            node = node.parentElement;
         }
 
-        const ariaText = normalizeText(button.getAttribute('aria-label') || '');
-        const match = ariaText.match(/(\d+(?:[,.]\d+)?\s*(?:k|m|millions?|milliers?)?)/);
-
-        return match ? match[1].replace('.', ',') : '';
+        return node && node.parentElement === parent ? node : null;
     }
 
-    function clickOriginalButton(button) {
-        if (!button) return;
-
-        try {
-            button.click();
+    function insertAfter(parent, node, referenceNode) {
+        if (referenceNode && referenceNode.parentElement === parent) {
+            parent.insertBefore(node, referenceNode.nextSibling);
             return;
-        } catch {
-            button.dispatchEvent(new MouseEvent('click', {
-                bubbles: true,
-                cancelable: true,
-                composed: true,
-                view: window
-            }));
-        }
-    }
-
-    function createReactionIcon(type) {
-        const svg = createSvgElement('svg', {
-            viewBox: '0 0 24 24',
-            'aria-hidden': 'true',
-            focusable: 'false'
-        });
-
-        if (type === 'like') {
-            svg.appendChild(createSvgElement('path', {
-                d: 'M7 10v11'
-            }));
-            svg.appendChild(createSvgElement('path', {
-                d: 'M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h.5A2.5 2.5 0 0 1 15 5.88Z',
-                class: 'ytc-thumb-body'
-            }));
-            return svg;
         }
 
-        svg.appendChild(createSvgElement('path', {
-            d: 'M17 14V3'
-        }));
-        svg.appendChild(createSvgElement('path', {
-            d: 'M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h-.5A2.5 2.5 0 0 1 9 18.12Z',
-            class: 'ytc-thumb-body'
-        }));
-
-        return svg;
+        parent.appendChild(node);
     }
 
-    function createReactionButton(type, text) {
-        const button = createNode('button', `ytc-reaction-button ytc-reaction-${type}`);
-        button.type = 'button';
-        button.dataset.action = type;
-        button.title = type === 'like' ? "J'aime ce contenu" : "Je n'aime pas ce contenu";
-        button.setAttribute('aria-label', button.title);
-        button.appendChild(createReactionIcon(type));
-
-        const count = createNode('span', type === 'like' ? 'ytc-like-count' : 'ytc-dislike-count', text);
-
-        if (type === 'dislike') {
-            count.id = 'ytc-dislikes';
-            count.setAttribute('role', 'status');
-            count.setAttribute('aria-live', 'polite');
-            count.title = 'Return YouTube Dislike';
-        }
-
-        button.appendChild(count);
-
-        return button;
-    }
-
-    function syncReactionCloneState(clone, parts) {
-        const likeCount = clone.querySelector('.ytc-like-count');
-        const likeText = extractButtonCount(parts.likeButton);
-        const localReaction = clone.dataset.localReaction || '';
-        const likePressed = localReaction
-            ? localReaction === 'like'
-            : parts.likeButton.getAttribute('aria-pressed') === 'true';
-        const dislikePressed = localReaction
-            ? localReaction === 'dislike'
-            : parts.dislikeButton.getAttribute('aria-pressed') === 'true';
-
-        if (likeCount && likeText) {
-            setTextWithCountAnimation(likeCount, likeText);
-        }
-
-        clone.querySelector('[data-action="like"]')?.setAttribute('aria-pressed', likePressed ? 'true' : 'false');
-        clone.querySelector('[data-action="dislike"]')?.setAttribute('aria-pressed', dislikePressed ? 'true' : 'false');
-    }
-
-    function animateCountChange(node) {
+    function setCountText(node, text, rawCount) {
         if (!node) return;
 
-        node.classList.remove('ytc-count-updated');
-        void node.offsetWidth;
-        node.classList.add('ytc-count-updated');
+        const nextRawCount = Number(rawCount);
+        const hasRawCount = Number.isFinite(nextRawCount);
 
-        window.setTimeout(() => {
-            node.classList.remove('ytc-count-updated');
-        }, 360);
-    }
-
-    function setTextWithCountAnimation(node, text) {
-        if (!node) return;
-
-        if (node.textContent && node.textContent !== text) {
-            animateCountChange(node);
+        if (hasRawCount) {
+            node.dataset.rawCount = String(nextRawCount);
         }
 
         node.textContent = text;
     }
 
+    function setFormattedCount(node, count) {
+        const safeCount = Math.max(0, Math.round(Number(count) || 0));
+        setCountText(node, formatCompactNumber(safeCount), safeCount);
+    }
+
     function setDislikeCount(badge, count, options = {}) {
         const safeCount = Math.max(0, Math.round(Number(count) || 0));
-        const text = formatCompactNumber(safeCount);
-        badge.dataset.rawCount = String(safeCount);
         badge.dataset.state = 'ready';
-        setTextWithCountAnimation(badge, text);
+        setFormattedCount(badge, safeCount);
 
         const videoId = getCurrentVideoId();
         if (videoId && options.updateCache !== false) {
+            const cached = dislikeCache.get(videoId) || {};
+
             dislikeCache.set(videoId, {
-                count: safeCount,
-                fetchedAt: options.fetchedAt || Date.now()
+                ...cached,
+                dislikes: safeCount,
+                fetchedAt: options.fetchedAt || cached.fetchedAt || Date.now()
             });
         }
     }
 
-    function animateReaction(button, becomesActive) {
-        if (!button) return;
-
-        button.classList.remove('ytc-reaction-pop', 'ytc-reaction-burst');
-        void button.offsetWidth;
-        button.classList.add('ytc-reaction-pop');
-
-        if (becomesActive) {
-            button.classList.add('ytc-reaction-burst');
-        }
-
-        window.setTimeout(() => {
-            button.classList.remove('ytc-reaction-pop', 'ytc-reaction-burst');
-        }, 620);
+    function getReactionIcon(button) {
+        return button.querySelector('.yt-spec-button-shape-next__icon') ||
+            button.querySelector('yt-icon') ||
+            button.querySelector('svg');
     }
 
-    function updateOptimisticReaction(clone, action) {
-        const likeButton = clone.querySelector('[data-action="like"]');
-        const dislikeButton = clone.querySelector('[data-action="dislike"]');
-        const badge = clone.querySelector('#ytc-dislikes');
-        const wasLiked = likeButton?.getAttribute('aria-pressed') === 'true';
-        const wasDisliked = dislikeButton?.getAttribute('aria-pressed') === 'true';
+    function placeCountNode(button, count, hostClass) {
+        const icon = getReactionIcon(button);
+        const directIcon = icon ? getDirectChildWithin(button, icon) : null;
 
-        let nextLiked = wasLiked;
-        let nextDisliked = wasDisliked;
+        button.classList.add(hostClass);
+        insertAfter(button, count, directIcon);
+    }
 
-        if (action === 'like') {
-            nextLiked = !wasLiked;
-            nextDisliked = false;
-        } else {
-            nextDisliked = !wasDisliked;
-            nextLiked = false;
+    function getReactionPressedState(button) {
+        const pressedElement = button.matches('[aria-pressed], [aria-checked]')
+            ? button
+            : button.querySelector('[aria-pressed], [aria-checked]');
+
+        if (!pressedElement) return null;
+
+        const value =
+            pressedElement.getAttribute('aria-pressed') ||
+            pressedElement.getAttribute('aria-checked') ||
+            '';
+
+        if (value === 'true') return true;
+        if (value === 'false') return false;
+
+        return null;
+    }
+
+    function getDislikePressedState(dislikeButton) {
+        const nativeState = getReactionPressedState(dislikeButton);
+
+        if (nativeState !== null) {
+            dislikeButton.dataset.ytcDislikePressed = nativeState ? 'true' : 'false';
+            return nativeState;
         }
 
-        likeButton?.setAttribute('aria-pressed', nextLiked ? 'true' : 'false');
-        dislikeButton?.setAttribute('aria-pressed', nextDisliked ? 'true' : 'false');
-        clone.dataset.localReaction = nextLiked ? 'like' : nextDisliked ? 'dislike' : 'none';
+        return dislikeButton.dataset.ytcDislikePressed === 'true';
+    }
 
-        if (badge) {
-            const rawCount = Number(badge.dataset.rawCount);
-            const parsedCount = Number.isFinite(rawCount) ? rawCount : parseCompactNumber(badge.textContent || '');
+    function getNodeCount(node) {
+        const rawCount = Number(node.dataset.rawCount);
+        const parsedCount = Number.isFinite(rawCount) ? rawCount : parseCountNumber(node.textContent || '');
 
-            if (Number.isFinite(parsedCount)) {
-                let nextCount = parsedCount;
+        return Number.isFinite(parsedCount) ? parsedCount : null;
+    }
 
-                if (action === 'dislike') {
-                    nextCount += nextDisliked ? 1 : -1;
-                } else if (wasDisliked) {
-                    nextCount -= 1;
-                }
+    function updateDislikeCountFromClick(dislikeButton, badge, wasDisliked) {
+        if (!settings.enabled || !settings.showDislikes || !badge.isConnected) return;
 
-                setDislikeCount(badge, nextCount);
+        const nativeState = getReactionPressedState(dislikeButton);
+        const isDisliked = nativeState === null || nativeState === wasDisliked
+            ? !wasDisliked
+            : nativeState;
+
+        dislikeButton.dataset.ytcDislikePressed = isDisliked ? 'true' : 'false';
+
+        if (isDisliked === wasDisliked) return;
+
+        const parsedCount = getNodeCount(badge);
+
+        if (parsedCount !== null) {
+            setDislikeCount(badge, parsedCount + (isDisliked ? 1 : -1));
+        }
+    }
+
+    function wireDislikeButton(dislikeButton) {
+        if (dislikeButton.dataset.ytcDislikeClickWired === 'true') return;
+
+        dislikeButton.dataset.ytcDislikeClickWired = 'true';
+        dislikeButton.dataset.ytcDislikePressed = getDislikePressedState(dislikeButton) ? 'true' : 'false';
+
+        dislikeButton.addEventListener('click', () => {
+            const wasDisliked = dislikeButton.dataset.ytcDislikePressed === 'true';
+            const badge = document.getElementById('ytc-dislikes');
+
+            if (badge) {
+                updateDislikeCountFromClick(dislikeButton, badge, wasDisliked);
             }
-        }
-
-        animateReaction(action === 'like' ? likeButton : dislikeButton, action === 'like' ? nextLiked : nextDisliked);
+        });
     }
 
-    function createReactionClone(parts) {
-        removeDislikeBadge();
-
-        if (!parts.source.dataset.ytcReactionSourceId) {
-            reactionSourceId += 1;
-            parts.source.dataset.ytcReactionSourceId = String(reactionSourceId);
-        }
-
-        const cloneWrap = createNode('div', 'ytc-reaction-clone');
-        cloneWrap.id = 'ytc-reaction-clone';
-        cloneWrap.dataset.sourceId = parts.source.dataset.ytcReactionSourceId;
-        cloneWrap.title = 'YouTube Cleaner like/dislike count';
-
-        const likeButton = createReactionButton('like', extractButtonCount(parts.likeButton));
-        const separator = createNode('span', 'ytc-reaction-separator');
-        const dislikeButton = createReactionButton('dislike', '...');
-
-        likeButton.addEventListener('click', (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            updateOptimisticReaction(cloneWrap, 'like');
-            clickOriginalButton(parts.likeButton);
-            setTimeout(scheduleCleanup, 150);
-        });
-
-        dislikeButton.addEventListener('click', (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            updateOptimisticReaction(cloneWrap, 'dislike');
-            clickOriginalButton(parts.dislikeButton);
-            setTimeout(scheduleCleanup, 150);
-        });
-
-        cloneWrap.appendChild(likeButton);
-        cloneWrap.appendChild(separator);
-        cloneWrap.appendChild(dislikeButton);
-
-        parts.insertBefore.parentElement.insertBefore(cloneWrap, parts.insertBefore);
-        parts.hiddenNodes.forEach((node) => {
-            node.classList.add('ytc-reaction-original-hidden');
-        });
-
-        syncReactionCloneState(cloneWrap, parts);
-
-        return cloneWrap;
+    function placeDislikeCountNode(dislikeButton, count) {
+        placeCountNode(dislikeButton, count, 'ytc-dislike-count-host');
+        wireDislikeButton(dislikeButton);
     }
 
-    function ensureReactionClone() {
+    function ensureDislikeCountNode() {
         const parts = getOriginalReactionParts();
-        if (!parts || !parts.insertBefore.parentElement) return null;
+        const dislikeButton = parts ? parts.dislikeButton : null;
+        const existing = document.getElementById('ytc-dislikes');
 
-        const existing = document.getElementById('ytc-reaction-clone');
-        const sourceId = parts.source.dataset.ytcReactionSourceId;
-
-        if (
-            existing &&
-            sourceId &&
-            existing.dataset.sourceId === sourceId &&
-            parts.hiddenNodes.every((node) => node.classList.contains('ytc-reaction-original-hidden'))
-        ) {
-            syncReactionCloneState(existing, parts);
+        if (existing && dislikeButton && dislikeButton.contains(existing)) {
+            placeDislikeCountNode(dislikeButton, existing);
             return existing;
         }
 
-        return createReactionClone(parts);
+        if (existing) {
+            existing.remove();
+        }
+
+        if (!dislikeButton) return null;
+
+        const count = createNode('span', 'ytc-dislike-count', '...');
+        count.id = 'ytc-dislikes';
+        count.setAttribute('role', 'status');
+        count.setAttribute('aria-live', 'polite');
+        count.title = 'Return YouTube Dislike';
+
+        placeDislikeCountNode(dislikeButton, count);
+        return count;
     }
 
-    function ensureDislikeCountNode(clone) {
-        return clone.querySelector('#ytc-dislikes');
+    function removeInjectedLikeCount() {
+        const badge = document.getElementById('ytc-likes');
+        if (badge) {
+            badge.remove();
+        }
+
+        queryAll('.ytc-native-count-hidden').forEach((element) => {
+            element.classList.remove('ytc-native-count-hidden');
+        });
+
+        queryAll('.ytc-like-count-host').forEach((element) => {
+            element.classList.remove('ytc-like-count-host');
+        });
     }
 
     function removeDislikeBadge() {
-        const clone = document.getElementById('ytc-reaction-clone');
-        if (clone) {
-            clone.remove();
+        const badge = document.getElementById('ytc-dislikes');
+        if (badge) {
+            badge.remove();
         }
 
-        queryAll('.ytc-reaction-original-hidden').forEach((element) => {
-            element.classList.remove('ytc-reaction-original-hidden');
+        queryAll('.ytc-dislike-count-host').forEach((element) => {
+            element.classList.remove('ytc-dislike-count-host');
         });
 
         currentDislikeVideoId = '';
@@ -693,19 +624,18 @@
     function updateDislikeDisplay(forceRefresh = false) {
         if (!settings.enabled || !settings.showDislikes || !isWatchPage()) {
             removeDislikeBadge();
+            removeInjectedLikeCount();
             return;
         }
 
         const videoId = getCurrentVideoId();
         if (!videoId) {
             removeDislikeBadge();
+            removeInjectedLikeCount();
             return;
         }
 
-        const reactionClone = ensureReactionClone();
-        if (!reactionClone) return;
-
-        const badge = ensureDislikeCountNode(reactionClone);
+        const badge = ensureDislikeCountNode();
         if (!badge) return;
 
         const cachedDislikes = readCachedDislikeCount(videoId);
@@ -717,7 +647,7 @@
         if (shouldUseCache) {
             currentDislikeVideoId = videoId;
             badge.dataset.videoId = videoId;
-            setDislikeCount(badge, cachedDislikes.count, {
+            setDislikeCount(badge, cachedDislikes.dislikes, {
                 fetchedAt: cachedDislikes.fetchedAt
             });
             return;
@@ -733,14 +663,19 @@
 
         currentDislikeVideoId = videoId;
         badge.dataset.videoId = videoId;
-        setDislikeBadgeState(badge, 'loading', '...');
+
+        if (!badge.dataset.rawCount) {
+            setDislikeBadgeState(badge, 'loading', '...');
+        } else {
+            badge.dataset.state = 'loading';
+        }
 
         const requestId = ++currentDislikeRequestId;
 
         fetchDislikeCount(videoId)
             .then((count) => {
                 dislikeCache.set(videoId, {
-                    count,
+                    dislikes: count,
                     fetchedAt: Date.now()
                 });
 
@@ -753,10 +688,17 @@
                     return;
                 }
 
-                setDislikeCount(badge, count);
+                setDislikeCount(badge, count, {
+                    updateCache: false
+                });
             })
             .catch(() => {
                 if (requestId !== currentDislikeRequestId || getCurrentVideoId() !== videoId) {
+                    return;
+                }
+
+                if (badge.dataset.rawCount) {
+                    badge.dataset.state = 'ready';
                     return;
                 }
 
@@ -766,13 +708,6 @@
 
     function refreshReactionCounters() {
         if (!settings.enabled || !settings.showDislikes || !isWatchPage()) return;
-
-        const clone = document.getElementById('ytc-reaction-clone');
-        const parts = getOriginalReactionParts();
-
-        if (clone && parts) {
-            syncReactionCloneState(clone, parts);
-        }
 
         if (Date.now() - lastDislikeRefreshAt >= 60000) {
             lastDislikeRefreshAt = Date.now();
@@ -786,12 +721,17 @@
         if (!settings.enabled) {
             unhideElements();
             removeDislikeBadge();
+            removeInjectedLikeCount();
             return;
         }
 
         hideShorts();
         hideSubscriptionSections();
         updateDislikeDisplay();
+
+        if (!settings.showDislikes || !isWatchPage()) {
+            removeInjectedLikeCount();
+        }
     }
 
     function scheduleCleanup() {
@@ -821,6 +761,7 @@
 
         if (!settings.enabled || !settings.showDislikes) {
             removeDislikeBadge();
+            removeInjectedLikeCount();
         }
 
         scheduleCleanup();
@@ -830,117 +771,6 @@
         const css = `
             .ytc-hidden {
                 display: none !important;
-            }
-
-            .ytc-reaction-original-hidden {
-                display: none !important;
-            }
-
-            #ytc-reaction-clone {
-                display: inline-flex;
-                align-items: center;
-                height: 40px;
-                border-radius: 20px;
-                overflow: hidden;
-                background: rgba(0, 0, 0, .05);
-                color: #0f0f0f;
-                font-family: Roboto, Arial, sans-serif;
-                vertical-align: middle;
-            }
-
-            html[dark] #ytc-reaction-clone {
-                background: rgba(255, 255, 255, .10);
-                color: #f1f1f1;
-            }
-
-            .ytc-reaction-button {
-                height: 40px;
-                min-width: 62px;
-                border: 0;
-                background: transparent;
-                color: inherit;
-                cursor: pointer !important;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                gap: 8px;
-                padding: 0 14px;
-                margin: 0;
-                font: inherit;
-                font-size: 14px;
-                font-weight: 500;
-                line-height: 1;
-                overflow: visible;
-                position: relative;
-            }
-
-            .ytc-reaction-button::before {
-                content: "";
-                position: absolute;
-                inset: -8px -4px;
-                border-radius: 999px;
-                opacity: 0;
-                pointer-events: none;
-                transform: scale(.55);
-                background:
-                    radial-gradient(circle at 18% 42%, #ff2f6d 0 2px, transparent 3px),
-                    radial-gradient(circle at 30% 20%, #ffcf3f 0 2px, transparent 3px),
-                    radial-gradient(circle at 50% 14%, #3ea6ff 0 2px, transparent 3px),
-                    radial-gradient(circle at 70% 22%, #ff2f6d 0 2px, transparent 3px),
-                    radial-gradient(circle at 82% 46%, #3ea6ff 0 2px, transparent 3px),
-                    radial-gradient(circle at 64% 78%, #ffcf3f 0 2px, transparent 3px),
-                    radial-gradient(circle at 35% 80%, #3ea6ff 0 2px, transparent 3px);
-            }
-
-            .ytc-reaction-button:hover {
-                background: rgba(0, 0, 0, .08);
-            }
-
-            html[dark] .ytc-reaction-button:hover {
-                background: rgba(255, 255, 255, .10);
-            }
-
-            .ytc-reaction-button[aria-pressed="true"] {
-                color: #3ea6ff;
-            }
-
-            .ytc-reaction-button.ytc-reaction-pop svg {
-                animation: ytc-reaction-pop .28s cubic-bezier(.2, 1.45, .35, 1);
-            }
-
-            .ytc-reaction-button.ytc-reaction-burst::before {
-                animation: ytc-reaction-burst .48s ease-out;
-            }
-
-            .ytc-reaction-button svg {
-                width: 22px;
-                height: 22px;
-                fill: none;
-                stroke: currentColor;
-                stroke-width: 2;
-                stroke-linecap: round;
-                stroke-linejoin: round;
-                flex: 0 0 auto;
-            }
-
-            .ytc-reaction-button .ytc-thumb-body {
-                fill: transparent;
-                transition: fill .12s ease, transform .12s ease;
-            }
-
-            .ytc-reaction-button[aria-pressed="true"] .ytc-thumb-body {
-                fill: currentColor;
-            }
-
-            .ytc-reaction-separator {
-                width: 1px;
-                height: 20px;
-                background: rgba(0, 0, 0, .12);
-                flex: 0 0 auto;
-            }
-
-            html[dark] .ytc-reaction-separator {
-                background: rgba(255, 255, 255, .16);
             }
 
             html[data-ytc-hide-shorts="true"] ytd-reel-shelf-renderer,
@@ -1222,57 +1052,40 @@
                 opacity: .65;
             }
 
-            .ytc-like-count,
             .ytc-dislike-count {
                 display: inline-flex;
                 align-items: center;
-                font-weight: 700;
-                font-size: 13px;
-                line-height: 1;
+                justify-content: center;
+                align-self: center;
+                min-width: max-content;
+                height: 20px;
+                flex: 0 0 auto;
+                font-family: Roboto, Arial, sans-serif;
+                font-weight: 500;
+                font-size: 14px;
+                line-height: 20px;
                 color: inherit;
                 pointer-events: none;
                 white-space: nowrap;
             }
 
-            .ytc-count-updated {
-                animation: ytc-count-updated .26s ease-out;
+            .ytc-dislike-count-host {
+                display: inline-flex !important;
+                align-items: center !important;
+                flex-direction: row !important;
+                gap: 6px !important;
+                min-width: max-content !important;
+                max-width: none !important;
+                width: auto !important;
+                overflow: visible !important;
             }
 
-            @keyframes ytc-reaction-pop {
-                0% {
-                    transform: scale(.72) rotate(-6deg);
-                }
-                58% {
-                    transform: scale(1.22) rotate(4deg);
-                }
-                100% {
-                    transform: scale(1) rotate(0);
-                }
-            }
-
-            @keyframes ytc-reaction-burst {
-                0% {
-                    opacity: 0;
-                    transform: scale(.45);
-                }
-                18% {
-                    opacity: 1;
-                }
-                100% {
-                    opacity: 0;
-                    transform: scale(1.24);
-                }
-            }
-
-            @keyframes ytc-count-updated {
-                0% {
-                    transform: translateY(6px);
-                    opacity: .35;
-                }
-                100% {
-                    transform: translateY(0);
-                    opacity: 1;
-                }
+            segmented-like-dislike-button-view-model:has(#ytc-dislikes) {
+                display: inline-flex !important;
+                min-width: max-content !important;
+                max-width: none !important;
+                width: auto !important;
+                overflow: visible !important;
             }
 
         `;
@@ -1612,6 +1425,8 @@
 
             button.dataset.active = isActive ? 'true' : 'false';
             button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+            button.disabled = false;
+            button.setAttribute('aria-disabled', 'false');
         });
 
         const slider = menu.querySelector('#ytc-column-slider');

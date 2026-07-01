@@ -146,9 +146,9 @@ Most features run entirely in your browser and only change the local YouTube int
 
 The **Show dislikes** option calls the public [Return YouTube Dislike](https://returnyoutubedislike.com/) API for the current video ID. Keep it disabled if you do not want the script to make that external request.
 
-When dislikes are enabled, YouTube Cleaner renders a replacement like/dislike button group, hides the original YouTube controls, and forwards replacement button clicks to the original buttons. This keeps the native YouTube actions available while letting the script display the dislike count.
+When dislikes are enabled, YouTube Cleaner keeps YouTube's native like/dislike buttons and injects the Return YouTube Dislike count into the original dislike button.
 
-The replacement reaction buttons refresh their visible counts regularly.
+The dislike count refreshes regularly and stays in a compact YouTube-style format.
 
 ---
 
@@ -261,6 +261,15 @@ YouTube-Cleaner.user.js
 ---
 
 ## Changelog
+
+### 1.0.2
+
+- Fixed the dislike counter placement by keeping YouTube's native reaction buttons
+- Removed the replacement like/dislike button group
+- Removed the compact/full count option after it proved too fragile on YouTube's current layout
+- Kept the dislike count in a compact YouTube-style format
+- Added regular dislike count refresh without touching the native like counter
+- Kept the userscript version aligned with this release at `1.0.2`
 
 ### 1.0.1
 
