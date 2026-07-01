@@ -1,9 +1,12 @@
 // ==UserScript==
-// @name         YouTube Cleaner
+// @name         YouTube Cleaner - Hide Shorts & Clean Layout
 // @namespace    https://github.com/Tkremre/ytcleaner
 // @version      1.0.2
-// @description  Bring back a cleaner old-school YouTube desktop layout.
+// @description  Hide YouTube Shorts, clean subscriptions, restore a denser desktop grid, and optionally show dislike counts.
 // @author       Tkremre
+// @license      MIT
+// @homepageURL  https://github.com/Tkremre/ytcleaner
+// @supportURL   https://github.com/Tkremre/ytcleaner/issues
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
 // @grant        GM_addStyle
