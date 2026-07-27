@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Cleaner - Hide Shorts & Clean Layout
 // @namespace    https://github.com/Tkremre/ytcleaner
-// @version      1.0.2
+// @version      1.1.0
 // @description  Hide YouTube Shorts, clean subscriptions, restore a denser desktop grid, and optionally show dislike counts.
 // @author       Tkremre
 // @license      MIT
@@ -13,6 +13,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      returnyoutubedislikeapi.com
 // @run-at       document-start
+// @noframes
 // @updateURL    https://raw.githubusercontent.com/Tkremre/ytcleaner/main/YouTube-Cleaner.user.js
 // @downloadURL  https://raw.githubusercontent.com/Tkremre/ytcleaner/main/YouTube-Cleaner.user.js
 // ==/UserScript==
@@ -28,42 +29,31 @@
         columns: '5',
         automaticColumns: false,
         hideShorts: true,
-        redirectShorts: true,
+        dimWatchedVideos: false,
         hideSubscriptionSections: true,
         showDislikes: false
     };
 
     const VALID_COLUMNS = ['1', '2', '3', '4', '5', '6', '7', '8'];
+    const HIDDEN_SHORTS_CLASS = 'ytc-hidden-shorts';
+    const HIDDEN_SUBSCRIPTIONS_CLASS = 'ytc-hidden-subscriptions';
+    const DISLIKE_CACHE_MAX_SIZE = 100;
 
-    const BLOCKED_SUBSCRIPTION_TITLES = [
-        'most relevant',
-        'les plus pertinentes',
-        'les plus pertinents',
-        'les plus populaires',
-        'mas relevantes',
-        'mas relevante',
-        'mas pertinentes',
-        'mais relevantes',
-        'mais pertinente',
-        'piu pertinenti',
-        'piu rilevanti',
-        'am relevantesten',
-        'relevanteste',
-        'meest relevant',
-        'meest relevante',
-        'najtrafniejsze',
-        'najbardziej trafne',
-        'en alakali',
-        'paling relevan',
-        'mest relevant',
-        'mest relevante',
-        'recommended',
-        'recommendations',
-        'videos recommended for you',
-        'videos recommandees pour vous',
-        'chaines recommandees',
-        'from channels you watch'
-    ];
+    const SUBSCRIPTION_NOISE_CONTAINER_SELECTOR = [
+        'ytd-rich-section-renderer',
+        'ytd-reel-shelf-renderer',
+        'grid-shelf-view-model'
+    ].join(',');
+
+    const SUBSCRIPTION_NOISE_CONTENT_SELECTOR = [
+        'ytd-rich-shelf-renderer',
+        'ytd-reel-shelf-renderer',
+        'ytd-horizontal-card-list-renderer',
+        'grid-shelf-view-model',
+        'yt-horizontal-list-renderer',
+        'ytd-post-renderer',
+        'ytd-backstage-post-thread-renderer'
+    ].join(',');
 
     let settings = loadSettings();
     let cleanupQueued = false;
@@ -72,25 +62,49 @@
     let currentDislikeRequestId = 0;
     let lastDislikeRefreshAt = 0;
     const dislikeCache = new Map();
+    const reportedCleanupErrors = new Set();
 
     function loadSettings() {
         try {
+            const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
             const loaded = {
                 ...DEFAULTS,
-                ...JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
+                ...saved
             };
 
+            loaded.enabled = typeof loaded.enabled === 'boolean'
+                ? loaded.enabled
+                : DEFAULTS.enabled;
             loaded.columns = String(loaded.columns);
 
             if (!VALID_COLUMNS.includes(loaded.columns)) {
                 loaded.columns = DEFAULTS.columns;
             }
 
-            loaded.automaticColumns = Boolean(loaded.automaticColumns);
-            loaded.hideShorts = loaded.hideShorts !== false;
-            loaded.redirectShorts = loaded.redirectShorts !== false;
-            loaded.hideSubscriptionSections = loaded.hideSubscriptionSections !== false;
-            loaded.showDislikes = Boolean(loaded.showDislikes);
+            loaded.hideShorts = typeof saved.hideShorts === 'boolean'
+                ? saved.hideShorts
+                : saved.shortsMode
+                    ? saved.shortsMode === 'hide'
+                    : DEFAULTS.hideShorts;
+
+            loaded.automaticColumns = typeof loaded.automaticColumns === 'boolean'
+                ? loaded.automaticColumns
+                : DEFAULTS.automaticColumns;
+            loaded.dimWatchedVideos = typeof loaded.dimWatchedVideos === 'boolean'
+                ? loaded.dimWatchedVideos
+                : DEFAULTS.dimWatchedVideos;
+            loaded.hideSubscriptionSections = typeof loaded.hideSubscriptionSections === 'boolean'
+                ? loaded.hideSubscriptionSections
+                : DEFAULTS.hideSubscriptionSections;
+            loaded.showDislikes = typeof loaded.showDislikes === 'boolean'
+                ? loaded.showDislikes
+                : DEFAULTS.showDislikes;
+
+            delete loaded.shortsMode;
+            delete loaded.redirectShorts;
+            delete loaded.redirectHomeToSubscriptions;
+            delete loaded.hideCommunityPosts;
+            delete loaded.cleanSidebar;
 
             return loaded;
         } catch {
@@ -99,7 +113,12 @@
     }
 
     function saveSettings() {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+        } catch {
+            // Keep the current session functional when storage is unavailable.
+        }
+
         applyState();
     }
 
@@ -123,15 +142,17 @@
         }
     }
 
-    function hideElement(element) {
+    function hideElement(element, className) {
         if (!element) return;
-        element.classList.add('ytc-hidden');
+        element.classList.add(className);
     }
 
-    function unhideElements() {
-        queryAll('.ytc-hidden').forEach((element) => {
-            element.classList.remove('ytc-hidden');
-        });
+    function unhideElements(className) {
+        const elements = document.getElementsByClassName(className);
+
+        while (elements.length > 0) {
+            elements[0].classList.remove(className);
+        }
     }
 
     function isSubscriptionsPage() {
@@ -154,7 +175,7 @@
     }
 
     function redirectShortsPage() {
-        if (!settings.enabled || !settings.redirectShorts) return;
+        if (!settings.enabled || !settings.hideShorts) return;
 
         if (location.pathname.startsWith('/shorts/')) {
             location.replace('https://www.youtube.com/');
@@ -164,38 +185,15 @@
     function hideShortsNavigation() {
         if (!settings.enabled || !settings.hideShorts) return;
 
-        const navSelectors = [
-            'ytd-guide-entry-renderer',
-            'ytd-mini-guide-entry-renderer',
-            'ytd-guide-collapsible-entry-renderer',
-            'tp-yt-paper-item',
-            'a[href="/shorts"]',
-            'a[href^="/shorts"]',
-            'a[title="Shorts"]',
-            'a[aria-label="Shorts"]'
-        ];
-
-        queryAll(navSelectors.join(',')).forEach((item) => {
-            const link = item.matches('a') ? item : item.querySelector('a');
-            const href = link ? link.getAttribute('href') || '' : '';
-            const title = normalizeText(
-                item.getAttribute('title') ||
-                item.getAttribute('aria-label') ||
-                (link ? link.getAttribute('title') || link.getAttribute('aria-label') : '') ||
-                ''
-            );
-
-            const text = normalizeText(item.innerText || item.textContent);
-
-            const isShortsEntry =
-                href === '/shorts' ||
-                href.startsWith('/shorts') ||
-                title === 'shorts' ||
-                text === 'shorts';
-
-            if (isShortsEntry) {
-                hideElement(getCardContainer(item));
-            }
+        queryAll([
+            'ytd-guide-entry-renderer a[href="/shorts"]',
+            'ytd-guide-entry-renderer a[href="/shorts/"]',
+            'ytd-mini-guide-entry-renderer a[href="/shorts"]',
+            'ytd-mini-guide-entry-renderer a[href="/shorts/"]',
+            'ytd-guide-collapsible-entry-renderer a[href="/shorts"]',
+            'ytd-guide-collapsible-entry-renderer a[href="/shorts/"]'
+        ].join(',')).forEach((link) => {
+            hideElement(getCardContainer(link), HIDDEN_SHORTS_CLASS);
         });
     }
 
@@ -216,12 +214,12 @@
             'grid-shelf-view-model:has(a[href^="/shorts/"])'
         ];
 
-        selectors.forEach((selector) => {
-            queryAll(selector).forEach(hideElement);
+        queryAll(selectors.join(',')).forEach((element) => {
+            hideElement(element, HIDDEN_SHORTS_CLASS);
         });
 
         queryAll('a[href^="/shorts/"], a[href="/shorts"], a[href*="youtube.com/shorts/"]').forEach((link) => {
-            hideElement(getCardContainer(link));
+            hideElement(getCardContainer(link), HIDDEN_SHORTS_CLASS);
         });
     }
 
@@ -231,13 +229,22 @@
     }
 
     function hideSubscriptionSections() {
-        if (!settings.enabled || !settings.hideSubscriptionSections || !isSubscriptionsPage()) return;
+        if (
+            !settings.enabled ||
+            !settings.hideSubscriptionSections ||
+            !isSubscriptionsPage()
+        ) {
+            unhideElements(HIDDEN_SUBSCRIPTIONS_CLASS);
+            return;
+        }
 
-        queryAll('ytd-rich-section-renderer, ytd-reel-shelf-renderer').forEach((section) => {
-            const text = normalizeText(section.innerText || section.textContent);
+        queryAll(SUBSCRIPTION_NOISE_CONTAINER_SELECTOR).forEach((section) => {
+            const hasNoiseRenderer =
+                section.matches('ytd-reel-shelf-renderer, grid-shelf-view-model') ||
+                Boolean(section.querySelector(SUBSCRIPTION_NOISE_CONTENT_SELECTOR));
 
-            if (BLOCKED_SUBSCRIPTION_TITLES.some((title) => text.includes(title))) {
-                hideElement(section);
+            if (hasNoiseRenderer) {
+                hideElement(section, HIDDEN_SUBSCRIPTIONS_CLASS);
             }
         });
     }
@@ -281,30 +288,6 @@
         }).format(truncated);
 
         return `${formatted} ${suffix}`;
-    }
-
-    function parseCountNumber(value) {
-        const text = normalizeText(value);
-        if (!text) return NaN;
-
-        const groupedMatch = text.match(/\b(\d{1,3}(?:[\s.,]\d{3})+)\b/);
-
-        if (groupedMatch) {
-            return Number(groupedMatch[1].replace(/[^\d]/g, ''));
-        }
-
-        const compactMatch = text.match(/(\d+(?:[,.]\d+)?)(?:\s*)(k|m|millions?|million|milliers?|mille)\b/);
-
-        if (compactMatch) {
-            const number = Number(compactMatch[1].replace(',', '.'));
-            const suffix = compactMatch[2] || '';
-            const multiplier = /^m(?:illion)?s?$/.test(suffix) ? 1000000 : 1000;
-            return number * multiplier;
-        }
-
-        const integerMatch = text.match(/\b\d+\b/);
-
-        return integerMatch ? Number(integerMatch[0]) : NaN;
     }
 
     function requestJson(url) {
@@ -351,27 +334,6 @@
     function fetchDislikeCount(videoId) {
         return requestJson(`${DISLIKE_API_URL}${encodeURIComponent(videoId)}`)
             .then((data) => Number(data && data.dislikes) || 0);
-    }
-
-    function readCachedDislikeCount(videoId) {
-        const cached = dislikeCache.get(videoId);
-
-        if (typeof cached === 'number') {
-            return { dislikes: cached, fetchedAt: 0 };
-        }
-
-        if (cached && Number.isFinite(cached.dislikes)) {
-            return cached;
-        }
-
-        if (cached && Number.isFinite(cached.count)) {
-            return {
-                dislikes: cached.count,
-                fetchedAt: cached.fetchedAt || 0
-            };
-        }
-
-        return null;
     }
 
     function findElement(selector, root = document) {
@@ -448,7 +410,9 @@
             node.dataset.rawCount = String(nextRawCount);
         }
 
-        node.textContent = text;
+        if (node.textContent !== text) {
+            node.textContent = text;
+        }
     }
 
     function setFormattedCount(node, count) {
@@ -465,11 +429,21 @@
         if (videoId && options.updateCache !== false) {
             const cached = dislikeCache.get(videoId) || {};
 
-            dislikeCache.set(videoId, {
+            writeDislikeCache(videoId, {
                 ...cached,
                 dislikes: safeCount,
                 fetchedAt: options.fetchedAt || cached.fetchedAt || Date.now()
             });
+        }
+    }
+
+    function writeDislikeCache(videoId, value) {
+        dislikeCache.delete(videoId);
+        dislikeCache.set(videoId, value);
+
+        while (dislikeCache.size > DISLIKE_CACHE_MAX_SIZE) {
+            const oldestKey = dislikeCache.keys().next().value;
+            dislikeCache.delete(oldestKey);
         }
     }
 
@@ -518,9 +492,7 @@
 
     function getNodeCount(node) {
         const rawCount = Number(node.dataset.rawCount);
-        const parsedCount = Number.isFinite(rawCount) ? rawCount : parseCountNumber(node.textContent || '');
-
-        return Number.isFinite(parsedCount) ? parsedCount : null;
+        return Number.isFinite(rawCount) ? rawCount : null;
     }
 
     function updateDislikeCountFromClick(dislikeButton, badge, wasDisliked) {
@@ -589,21 +561,6 @@
         return count;
     }
 
-    function removeInjectedLikeCount() {
-        const badge = document.getElementById('ytc-likes');
-        if (badge) {
-            badge.remove();
-        }
-
-        queryAll('.ytc-native-count-hidden').forEach((element) => {
-            element.classList.remove('ytc-native-count-hidden');
-        });
-
-        queryAll('.ytc-like-count-host').forEach((element) => {
-            element.classList.remove('ytc-like-count-host');
-        });
-    }
-
     function removeDislikeBadge() {
         const badge = document.getElementById('ytc-dislikes');
         if (badge) {
@@ -627,23 +584,22 @@
     function updateDislikeDisplay(forceRefresh = false) {
         if (!settings.enabled || !settings.showDislikes || !isWatchPage()) {
             removeDislikeBadge();
-            removeInjectedLikeCount();
             return;
         }
 
         const videoId = getCurrentVideoId();
         if (!videoId) {
             removeDislikeBadge();
-            removeInjectedLikeCount();
             return;
         }
 
         const badge = ensureDislikeCountNode();
         if (!badge) return;
 
-        const cachedDislikes = readCachedDislikeCount(videoId);
+        const cachedDislikes = dislikeCache.get(videoId);
         const shouldUseCache =
             cachedDislikes &&
+            Number.isFinite(cachedDislikes.dislikes) &&
             !forceRefresh &&
             Date.now() - cachedDislikes.fetchedAt < 60000;
 
@@ -664,10 +620,15 @@
             return;
         }
 
+        const isNewVideo = badge.dataset.videoId !== videoId;
+
         currentDislikeVideoId = videoId;
         badge.dataset.videoId = videoId;
 
-        if (!badge.dataset.rawCount) {
+        if (isNewVideo) {
+            delete badge.dataset.rawCount;
+            setDislikeBadgeState(badge, 'loading', '...');
+        } else if (!badge.dataset.rawCount) {
             setDislikeBadgeState(badge, 'loading', '...');
         } else {
             badge.dataset.state = 'loading';
@@ -677,7 +638,7 @@
 
         fetchDislikeCount(videoId)
             .then((count) => {
-                dislikeCache.set(videoId, {
+                writeDislikeCache(videoId, {
                     dislikes: count,
                     fetchedAt: Date.now()
                 });
@@ -710,7 +671,14 @@
     }
 
     function refreshReactionCounters() {
-        if (!settings.enabled || !settings.showDislikes || !isWatchPage()) return;
+        if (
+            document.hidden ||
+            !settings.enabled ||
+            !settings.showDislikes ||
+            !isWatchPage()
+        ) {
+            return;
+        }
 
         if (Date.now() - lastDislikeRefreshAt >= 60000) {
             lastDislikeRefreshAt = Date.now();
@@ -718,23 +686,39 @@
         }
     }
 
+    function runCleanupTask(label, task) {
+        try {
+            task();
+            reportedCleanupErrors.delete(label);
+        } catch (error) {
+            if (!reportedCleanupErrors.has(label)) {
+                reportedCleanupErrors.add(label);
+                console.warn(`[YouTube Cleaner] ${label} failed`, error);
+            }
+        }
+    }
+
     function cleanPage() {
-        redirectShortsPage();
+        runCleanupTask('Shorts redirect', redirectShortsPage);
 
         if (!settings.enabled) {
-            unhideElements();
-            removeDislikeBadge();
-            removeInjectedLikeCount();
+            runCleanupTask('disabled state cleanup', () => {
+                unhideElements(HIDDEN_SHORTS_CLASS);
+                unhideElements(HIDDEN_SUBSCRIPTIONS_CLASS);
+                removeDislikeBadge();
+            });
             return;
         }
 
-        hideShorts();
-        hideSubscriptionSections();
-        updateDislikeDisplay();
-
-        if (!settings.showDislikes || !isWatchPage()) {
-            removeInjectedLikeCount();
-        }
+        runCleanupTask('Shorts cleanup', () => {
+            if (settings.hideShorts) {
+                hideShorts();
+            } else {
+                unhideElements(HIDDEN_SHORTS_CLASS);
+            }
+        });
+        runCleanupTask('Subscriptions cleanup', hideSubscriptionSections);
+        runCleanupTask('Dislike display', updateDislikeDisplay);
     }
 
     function scheduleCleanup() {
@@ -742,10 +726,46 @@
 
         cleanupQueued = true;
 
-        requestAnimationFrame(() => {
-            cleanupQueued = false;
-            cleanPage();
-            ensureButton();
+        window.setTimeout(() => {
+            if (document.hidden) {
+                cleanupQueued = false;
+                return;
+            }
+
+            requestAnimationFrame(() => {
+                cleanupQueued = false;
+                runCleanupTask('Settings button', ensureButton);
+                cleanPage();
+            });
+        }, 100);
+    }
+
+    function mutationNeedsCleanup(mutations) {
+        const ownedSelector = '#ytc-menu, #ytc-button-wrap, #ytc-dislikes';
+
+        return mutations.some((mutation) => {
+            const removedOwnedNode = Array.from(mutation.removedNodes).some((node) => {
+                return node instanceof Element && (
+                    node.matches(ownedSelector) ||
+                    Boolean(node.querySelector(ownedSelector))
+                );
+            });
+
+            if (removedOwnedNode) {
+                return true;
+            }
+
+            return Array.from(mutation.addedNodes).some((node) => {
+                if (node instanceof Element) {
+                    return !node.matches(ownedSelector) && !node.closest(ownedSelector);
+                }
+
+                if (node instanceof DocumentFragment) {
+                    return Boolean(node.querySelector('*'));
+                }
+
+                return false;
+            });
         });
     }
 
@@ -753,18 +773,26 @@
         const root = document.documentElement;
 
         root.dataset.ytcEnabled = settings.enabled ? 'true' : 'false';
-        root.dataset.ytcHideShorts = settings.enabled && settings.hideShorts ? 'true' : 'false';
+        root.dataset.ytcHideShorts =
+            settings.enabled && settings.hideShorts ? 'true' : 'false';
+        root.dataset.ytcDimWatchedVideos =
+            settings.enabled && settings.dimWatchedVideos ? 'true' : 'false';
         root.dataset.ytcColumns =
             settings.enabled && !settings.automaticColumns ? settings.columns : 'auto';
 
         updateButtonState();
         updateMenuState();
 
-        unhideElements();
+        if (!settings.enabled || !settings.hideShorts) {
+            unhideElements(HIDDEN_SHORTS_CLASS);
+        }
+
+        if (!settings.enabled || !settings.hideSubscriptionSections) {
+            unhideElements(HIDDEN_SUBSCRIPTIONS_CLASS);
+        }
 
         if (!settings.enabled || !settings.showDislikes) {
             removeDislikeBadge();
-            removeInjectedLikeCount();
         }
 
         scheduleCleanup();
@@ -772,7 +800,8 @@
 
     function addStyles() {
         const css = `
-            .ytc-hidden {
+            .ytc-hidden-shorts,
+            .ytc-hidden-subscriptions {
                 display: none !important;
             }
 
@@ -787,6 +816,23 @@
             html[data-ytc-hide-shorts="true"] ytd-mini-guide-entry-renderer:has(a[title="Shorts"]),
             html[data-ytc-hide-shorts="true"] yt-tab-shape[tab-title="Shorts"] {
                 display: none !important;
+            }
+
+            html[data-ytc-dim-watched-videos="true"] ytd-rich-item-renderer:has(ytd-thumbnail-overlay-resume-playback-renderer),
+            html[data-ytc-dim-watched-videos="true"] ytd-rich-item-renderer:has(yt-thumbnail-overlay-progress-bar-view-model),
+            html[data-ytc-dim-watched-videos="true"] ytd-video-renderer:has(ytd-thumbnail-overlay-resume-playback-renderer),
+            html[data-ytc-dim-watched-videos="true"] ytd-grid-video-renderer:has(ytd-thumbnail-overlay-resume-playback-renderer),
+            html[data-ytc-dim-watched-videos="true"] yt-lockup-view-model:has(yt-thumbnail-overlay-progress-bar-view-model) {
+                opacity: .5;
+                transition: opacity .15s ease;
+            }
+
+            html[data-ytc-dim-watched-videos="true"] ytd-rich-item-renderer:has(ytd-thumbnail-overlay-resume-playback-renderer):hover,
+            html[data-ytc-dim-watched-videos="true"] ytd-rich-item-renderer:has(yt-thumbnail-overlay-progress-bar-view-model):hover,
+            html[data-ytc-dim-watched-videos="true"] ytd-video-renderer:has(ytd-thumbnail-overlay-resume-playback-renderer):hover,
+            html[data-ytc-dim-watched-videos="true"] ytd-grid-video-renderer:has(ytd-thumbnail-overlay-resume-playback-renderer):hover,
+            html[data-ytc-dim-watched-videos="true"] yt-lockup-view-model:has(yt-thumbnail-overlay-progress-bar-view-model):hover {
+                opacity: 1;
             }
 
             html[data-ytc-columns="1"] { --ytc-columns: 1; }
@@ -849,6 +895,13 @@
 
             #ytc-button:hover {
                 background: rgba(0, 0, 0, .08);
+            }
+
+            #ytc-button:focus-visible,
+            #ytc-menu button:focus-visible,
+            #ytc-menu input:focus-visible {
+                outline: 2px solid #3ea6ff;
+                outline-offset: 2px;
             }
 
             html[dark] #ytc-button:hover {
@@ -1180,6 +1233,8 @@
         const button = createNode('button', 'ytc-switch');
         button.type = 'button';
         button.dataset.setting = settingKey;
+        button.setAttribute('role', 'switch');
+        button.setAttribute('aria-label', title);
 
         button.addEventListener('click', (event) => {
             event.stopPropagation();
@@ -1246,7 +1301,11 @@
 
     function ensureButton() {
         if (!document.body) return;
-        if (document.getElementById('ytc-button-wrap')) return;
+        if (document.getElementById('ytc-button-wrap')) {
+            ensureMenu();
+            updateButtonState();
+            return;
+        }
 
         const host =
             document.querySelector('ytd-masthead #end #buttons') ||
@@ -1263,6 +1322,8 @@
         button.type = 'button';
         button.title = 'YouTube Cleaner';
         button.setAttribute('aria-label', 'YouTube Cleaner');
+        button.setAttribute('aria-controls', 'ytc-menu');
+        button.setAttribute('aria-expanded', 'false');
         button.appendChild(createCleanerIcon());
 
         button.addEventListener('click', (event) => {
@@ -1294,6 +1355,8 @@
         const menu = createNode('div');
         menu.id = 'ytc-menu';
         menu.hidden = true;
+        menu.setAttribute('role', 'dialog');
+        menu.setAttribute('aria-label', 'YouTube Cleaner settings');
 
         const title = createNode('div', 'ytc-title', 'YouTube Cleaner');
 
@@ -1310,13 +1373,17 @@
             'Shorts',
             createSwitchRow(
                 'Hide Shorts',
-                'Remove Shorts from feeds and navigation',
+                'Remove Shorts from feeds, navigation, and direct Shorts pages',
                 'hideShorts'
-            ),
+            )
+        );
+
+        const browsingSection = createSection(
+            'Browsing',
             createSwitchRow(
-                'Redirect Shorts pages',
-                'Send /shorts/ links back to the homepage',
-                'redirectShorts'
+                'Dim watched videos',
+                'Fade videos that already have a progress bar',
+                'dimWatchedVideos'
             )
         );
 
@@ -1347,6 +1414,7 @@
         menu.appendChild(title);
         menu.appendChild(generalSection);
         menu.appendChild(shortsSection);
+        menu.appendChild(browsingSection);
         menu.appendChild(subscriptionsSection);
         menu.appendChild(layoutSection);
         menu.appendChild(extrasSection);
@@ -1361,6 +1429,19 @@
 
             if (!clickedButton && !clickedMenu) {
                 menu.hidden = true;
+                updateMenuExpandedState();
+            }
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape' || menu.hidden) return;
+
+            menu.hidden = true;
+            updateMenuExpandedState();
+
+            const button = document.getElementById('ytc-button');
+            if (button) {
+                button.focus();
             }
         });
 
@@ -1403,6 +1484,7 @@
         menu.hidden = !menu.hidden;
 
         updateMenuState();
+        updateMenuExpandedState();
 
         if (!menu.hidden) {
             positionMenu();
@@ -1418,6 +1500,15 @@
         button.setAttribute('aria-pressed', settings.enabled ? 'true' : 'false');
     }
 
+    function updateMenuExpandedState() {
+        const button = document.getElementById('ytc-button');
+        const menu = document.getElementById('ytc-menu');
+
+        if (button) {
+            button.setAttribute('aria-expanded', menu && !menu.hidden ? 'true' : 'false');
+        }
+    }
+
     function updateMenuState() {
         const menu = document.getElementById('ytc-menu');
         if (!menu) return;
@@ -1427,7 +1518,8 @@
             const isActive = Boolean(settings[settingKey]);
 
             button.dataset.active = isActive ? 'true' : 'false';
-            button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+            button.setAttribute('aria-checked', isActive ? 'true' : 'false');
+            button.removeAttribute('aria-pressed');
             button.disabled = false;
             button.setAttribute('aria-disabled', 'false');
         });
@@ -1449,10 +1541,15 @@
         if (started) return;
         started = true;
 
+        redirectShortsPage();
         addStyles();
         applyState();
 
-        const observer = new MutationObserver(scheduleCleanup);
+        const observer = new MutationObserver((mutations) => {
+            if (mutationNeedsCleanup(mutations)) {
+                scheduleCleanup();
+            }
+        });
 
         observer.observe(document.documentElement, {
             childList: true,
@@ -1465,10 +1562,21 @@
         window.addEventListener('load', scheduleCleanup);
         window.addEventListener('resize', positionMenu);
         window.addEventListener('scroll', positionMenu, true);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                scheduleCleanup();
+                refreshReactionCounters();
+            }
+        });
+        window.addEventListener('storage', (event) => {
+            if (event.key !== STORAGE_KEY) return;
+
+            settings = loadSettings();
+            applyState();
+        });
 
         document.addEventListener('DOMContentLoaded', scheduleCleanup);
 
-        setInterval(scheduleCleanup, 2000);
         setInterval(refreshReactionCounters, 60000);
     }
 

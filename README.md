@@ -42,6 +42,7 @@ If you miss the 2015-2016 style YouTube desktop experience, this script tries to
 - Hide the Shorts button from the left sidebar
 - Redirect `/shorts/` pages back to the YouTube homepage
 - Remove "Most relevant", recommendations, and similar noisy blocks from the Subscriptions page
+- Optionally dim videos that already have a watch-progress indicator
 - Switch between automatic YouTube columns and a manual grid
 - Use a slider from 1 to 8 video thumbnails per row
 - Show dislike counts on watch pages with Return YouTube Dislike
@@ -108,8 +109,9 @@ Available settings:
 - **General**
   - Enable or disable YouTube Cleaner globally
 - **Shorts**
-  - Enable or disable Shorts hiding
-  - Enable or disable Shorts page redirection
+  - Hide or keep Shorts across feeds, navigation, and direct Shorts pages
+- **Browsing**
+  - Dim videos that already have a watch-progress indicator
 - **Subscriptions**
   - Enable or disable noisy subscription section hiding
 - **Layout**
@@ -130,7 +132,7 @@ For a desktop experience closer to older YouTube layouts:
 
 - Cleaner: enabled
 - Hide Shorts: enabled
-- Redirect Shorts pages: enabled
+- Dim watched videos: optional
 - Hide noisy subscription sections: enabled
 - Automatic grid: disabled
 - Manual columns: 5
@@ -262,6 +264,24 @@ YouTube-Cleaner.user.js
 ---
 
 ## Changelog
+
+### 1.1.0
+
+- Added an optional **Dim watched videos** setting based on YouTube's watch-progress renderers
+- Simplified Shorts controls to a single setting covering feeds, navigation, and direct Shorts pages
+- Switched subscription cleanup to renderer-based detection without translated title lists
+- Reduced repeated DOM work by combining Shorts selectors and debouncing mutation-driven cleanup
+- Removed the periodic full-page cleanup scan and paused cleanup work while the tab is hidden
+- Isolated cleanup features so one selector failure no longer prevents the settings button or other features from working
+- Restored the settings button automatically if YouTube removes it during navigation
+- Prevented script-generated DOM updates from retriggering unnecessary cleanup work
+- Added stricter settings validation and automatic migration from earlier settings formats
+- Improved menu accessibility with switch semantics, focus styles, Escape handling, and expanded-state attributes
+- Limited the in-memory dislike cache and kept background dislike refreshes inactive in hidden tabs
+- Removed obsolete compact-count parsing and cleanup code from the retired replacement reaction buttons
+- Prevented a previous video's dislike count from remaining visible while a new count loads
+- Prevented the userscript from running inside frames
+- Kept the userscript version aligned with this release at `1.1.0`
 
 ### 1.0.2
 
