@@ -1,6 +1,6 @@
 <div align="center">
 
-# YouTube Cleaner
+<h1><img src="./assets/youtube-cleaner.svg" alt="" width="40" height="40"> YouTube Cleaner</h1>
 
 ### Bring back a cleaner old-school YouTube desktop layout.
 
