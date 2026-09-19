@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Cleaner - Hide Shorts & Clean Layout
 // @namespace    https://github.com/Tkremre/ytcleaner
-// @version      1.1.0
-// @description  Hide YouTube Shorts, clean subscriptions, restore a denser desktop grid, and optionally show dislike counts.
+// @version      1.2.0
+// @description  Hide Shorts, watched videos, and Mixes; clean subscriptions, customize the grid, and optionally show dislikes.
 // @author       Tkremre
 // @license      MIT
 // @homepageURL  https://github.com/Tkremre/ytcleaner
@@ -29,12 +29,16 @@
         columns: '5',
         automaticColumns: false,
         hideShorts: true,
-        dimWatchedVideos: false,
+        watchedVideosMode: 'off',
+        hideMixes: false,
         hideSubscriptionSections: true,
+        hideUpcomingVideos: false,
         showDislikes: false
     };
 
     const VALID_COLUMNS = ['1', '2', '3', '4', '5', '6', '7', '8'];
+    const WATCHED_VIDEO_MODES = ['off', 'dim', 'hide'];
+    const WATCHED_VIDEO_MODE_LABELS = ['Off', 'Dim', 'Hide'];
     const HIDDEN_SHORTS_CLASS = 'ytc-hidden-shorts';
     const HIDDEN_SUBSCRIPTIONS_CLASS = 'ytc-hidden-subscriptions';
     const DISLIKE_CACHE_MAX_SIZE = 100;
@@ -90,12 +94,22 @@
             loaded.automaticColumns = typeof loaded.automaticColumns === 'boolean'
                 ? loaded.automaticColumns
                 : DEFAULTS.automaticColumns;
-            loaded.dimWatchedVideos = typeof loaded.dimWatchedVideos === 'boolean'
-                ? loaded.dimWatchedVideos
-                : DEFAULTS.dimWatchedVideos;
+            loaded.watchedVideosMode = WATCHED_VIDEO_MODES.includes(saved.watchedVideosMode)
+                ? saved.watchedVideosMode
+                : saved.hideWatchedVideos === true
+                    ? 'hide'
+                    : saved.dimWatchedVideos === true
+                        ? 'dim'
+                        : DEFAULTS.watchedVideosMode;
+            loaded.hideMixes = typeof loaded.hideMixes === 'boolean'
+                ? loaded.hideMixes
+                : DEFAULTS.hideMixes;
             loaded.hideSubscriptionSections = typeof loaded.hideSubscriptionSections === 'boolean'
                 ? loaded.hideSubscriptionSections
                 : DEFAULTS.hideSubscriptionSections;
+            loaded.hideUpcomingVideos = typeof loaded.hideUpcomingVideos === 'boolean'
+                ? loaded.hideUpcomingVideos
+                : DEFAULTS.hideUpcomingVideos;
             loaded.showDislikes = typeof loaded.showDislikes === 'boolean'
                 ? loaded.showDislikes
                 : DEFAULTS.showDislikes;
@@ -105,6 +119,8 @@
             delete loaded.redirectHomeToSubscriptions;
             delete loaded.hideCommunityPosts;
             delete loaded.cleanSidebar;
+            delete loaded.dimWatchedVideos;
+            delete loaded.hideWatchedVideos;
 
             return loaded;
         } catch {
@@ -170,7 +186,8 @@
             'yt-lockup-view-model',
             'grid-shelf-view-model',
             'ytd-guide-entry-renderer',
-            'ytd-mini-guide-entry-renderer'
+            'ytd-mini-guide-entry-renderer',
+            'ytd-guide-collapsible-entry-renderer'
         ].join(',')) || element;
     }
 
@@ -224,6 +241,8 @@
     }
 
     function hideShorts() {
+        // YouTube can reuse a card with a new URL, so reclassify previously hidden cards.
+        unhideElements(HIDDEN_SHORTS_CLASS);
         hideShortsNavigation();
         hideShortsContent();
     }
@@ -744,6 +763,12 @@
         const ownedSelector = '#ytc-menu, #ytc-button-wrap, #ytc-dislikes';
 
         return mutations.some((mutation) => {
+            if (mutation.type === 'attributes') {
+                return settings.enabled && settings.hideShorts &&
+                    mutation.target instanceof Element &&
+                    !mutation.target.closest(ownedSelector);
+            }
+
             const removedOwnedNode = Array.from(mutation.removedNodes).some((node) => {
                 return node instanceof Element && (
                     node.matches(ownedSelector) ||
@@ -775,8 +800,10 @@
         root.dataset.ytcEnabled = settings.enabled ? 'true' : 'false';
         root.dataset.ytcHideShorts =
             settings.enabled && settings.hideShorts ? 'true' : 'false';
-        root.dataset.ytcDimWatchedVideos =
-            settings.enabled && settings.dimWatchedVideos ? 'true' : 'false';
+        root.dataset.ytcWatchedVideos = settings.enabled ? settings.watchedVideosMode : 'off';
+        root.dataset.ytcHideMixes = settings.enabled && settings.hideMixes ? 'true' : 'false';
+        root.dataset.ytcHideUpcoming =
+            settings.enabled && settings.hideUpcomingVideos ? 'true' : 'false';
         root.dataset.ytcColumns =
             settings.enabled && !settings.automaticColumns ? settings.columns : 'auto';
 
@@ -812,27 +839,35 @@
             html[data-ytc-hide-shorts="true"] ytd-guide-entry-renderer:has(a[href^="/shorts"]),
             html[data-ytc-hide-shorts="true"] ytd-mini-guide-entry-renderer:has(a[href="/shorts"]),
             html[data-ytc-hide-shorts="true"] ytd-mini-guide-entry-renderer:has(a[href^="/shorts"]),
+            html[data-ytc-hide-shorts="true"] ytd-guide-collapsible-entry-renderer:has(a[href^="/shorts"]),
             html[data-ytc-hide-shorts="true"] ytd-guide-entry-renderer:has(a[title="Shorts"]),
             html[data-ytc-hide-shorts="true"] ytd-mini-guide-entry-renderer:has(a[title="Shorts"]),
             html[data-ytc-hide-shorts="true"] yt-tab-shape[tab-title="Shorts"] {
                 display: none !important;
             }
 
-            html[data-ytc-dim-watched-videos="true"] ytd-rich-item-renderer:has(ytd-thumbnail-overlay-resume-playback-renderer),
-            html[data-ytc-dim-watched-videos="true"] ytd-rich-item-renderer:has(yt-thumbnail-overlay-progress-bar-view-model),
-            html[data-ytc-dim-watched-videos="true"] ytd-video-renderer:has(ytd-thumbnail-overlay-resume-playback-renderer),
-            html[data-ytc-dim-watched-videos="true"] ytd-grid-video-renderer:has(ytd-thumbnail-overlay-resume-playback-renderer),
-            html[data-ytc-dim-watched-videos="true"] yt-lockup-view-model:has(yt-thumbnail-overlay-progress-bar-view-model) {
+            html[data-ytc-watched-videos="hide"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model):has(:is(ytd-thumbnail-overlay-resume-playback-renderer, yt-thumbnail-overlay-progress-bar-view-model)) {
+                display: none !important;
+            }
+
+            html[data-ytc-watched-videos="dim"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model):has(:is(ytd-thumbnail-overlay-resume-playback-renderer, yt-thumbnail-overlay-progress-bar-view-model)) {
                 opacity: .5;
                 transition: opacity .15s ease;
             }
 
-            html[data-ytc-dim-watched-videos="true"] ytd-rich-item-renderer:has(ytd-thumbnail-overlay-resume-playback-renderer):hover,
-            html[data-ytc-dim-watched-videos="true"] ytd-rich-item-renderer:has(yt-thumbnail-overlay-progress-bar-view-model):hover,
-            html[data-ytc-dim-watched-videos="true"] ytd-video-renderer:has(ytd-thumbnail-overlay-resume-playback-renderer):hover,
-            html[data-ytc-dim-watched-videos="true"] ytd-grid-video-renderer:has(ytd-thumbnail-overlay-resume-playback-renderer):hover,
-            html[data-ytc-dim-watched-videos="true"] yt-lockup-view-model:has(yt-thumbnail-overlay-progress-bar-view-model):hover {
+            html[data-ytc-watched-videos="dim"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model):has(:is(ytd-thumbnail-overlay-resume-playback-renderer, yt-thumbnail-overlay-progress-bar-view-model)):hover {
                 opacity: 1;
+            }
+
+            html[data-ytc-hide-mixes="true"] :is(ytd-radio-renderer, ytd-compact-radio-renderer),
+            html[data-ytc-hide-mixes="true"] ytd-rich-item-renderer:has(a[href$="start_radio=1"]),
+            html[data-ytc-hide-mixes="true"] :is(ytd-search, #related) yt-lockup-view-model:has(a[href*="&start_radio=1&"], a[href$="&start_radio=1"]) {
+                display: none !important;
+            }
+
+            html[data-ytc-hide-upcoming="true"] ytd-browse[page-subtype="subscriptions"] :is(ytd-rich-item-renderer, ytd-grid-video-renderer, ytd-video-renderer):has(ytd-thumbnail-overlay-time-status-renderer[overlay-style="UPCOMING"]),
+            html[data-ytc-hide-upcoming="true"] ytd-browse[page-subtype="subscriptions"] ytd-rich-item-renderer:has(lockup-attachments-view-model toggle-button-view-model) {
+                display: none !important;
             }
 
             html[data-ytc-columns="1"] { --ytc-columns: 1; }
@@ -1251,6 +1286,54 @@
         return row;
     }
 
+    function createWatchedModeSlider() {
+        const wrap = createNode('div', 'ytc-slider-wrap');
+        const head = createNode('div', 'ytc-slider-head');
+        const label = createNode('div', 'ytc-label', 'Watched videos');
+        const value = createNode('div', 'ytc-slider-value');
+        value.id = 'ytc-watched-mode-value';
+
+        const help = createNode('div', 'ytc-help', 'Based on thumbnail watch progress');
+        const slider = createNode('input', 'ytc-slider');
+        slider.id = 'ytc-watched-mode-slider';
+        slider.type = 'range';
+        slider.min = '0';
+        slider.max = '2';
+        slider.step = '1';
+        slider.setAttribute('aria-label', 'Watched videos');
+        slider.value = String(WATCHED_VIDEO_MODES.indexOf(settings.watchedVideosMode));
+        slider.setAttribute('aria-valuetext', WATCHED_VIDEO_MODE_LABELS[Number(slider.value)]);
+        value.textContent = WATCHED_VIDEO_MODE_LABELS[Number(slider.value)];
+
+        slider.addEventListener('input', (event) => {
+            event.stopPropagation();
+            if (!(event.target instanceof HTMLInputElement)) return;
+
+            const index = Number(event.target.value);
+            const mode = WATCHED_VIDEO_MODES[index];
+            if (!mode) return;
+
+            settings.watchedVideosMode = mode;
+            event.target.setAttribute('aria-valuetext', WATCHED_VIDEO_MODE_LABELS[index]);
+            value.textContent = WATCHED_VIDEO_MODE_LABELS[index];
+            saveSettings();
+        });
+
+        const scale = createNode('div', 'ytc-slider-scale');
+        WATCHED_VIDEO_MODE_LABELS.forEach((modeLabel) => {
+            scale.appendChild(createNode('span', null, modeLabel));
+        });
+
+        head.appendChild(label);
+        head.appendChild(value);
+        wrap.appendChild(head);
+        wrap.appendChild(help);
+        wrap.appendChild(slider);
+        wrap.appendChild(scale);
+
+        return wrap;
+    }
+
     function createColumnSlider() {
         const wrap = createNode('div', 'ytc-slider-wrap');
         const head = createNode('div', 'ytc-slider-head');
@@ -1380,10 +1463,11 @@
 
         const browsingSection = createSection(
             'Browsing',
+            createWatchedModeSlider(),
             createSwitchRow(
-                'Dim watched videos',
-                'Fade videos that already have a progress bar',
-                'dimWatchedVideos'
+                'Hide YouTube Mixes',
+                'Remove auto-generated Mix playlists from feeds and results',
+                'hideMixes'
             )
         );
 
@@ -1393,6 +1477,11 @@
                 'Hide noisy sections',
                 'Remove recommended and most relevant blocks',
                 'hideSubscriptionSections'
+            ),
+            createSwitchRow(
+                'Hide upcoming videos',
+                'Remove scheduled premieres and streams until they start',
+                'hideUpcomingVideos'
             )
         );
 
@@ -1497,7 +1586,6 @@
         if (!button) return;
 
         button.dataset.active = settings.enabled ? 'true' : 'false';
-        button.setAttribute('aria-pressed', settings.enabled ? 'true' : 'false');
     }
 
     function updateMenuExpandedState() {
@@ -1523,6 +1611,20 @@
             button.disabled = false;
             button.setAttribute('aria-disabled', 'false');
         });
+
+        const watchedSlider = menu.querySelector('#ytc-watched-mode-slider');
+        const watchedValue = menu.querySelector('#ytc-watched-mode-value');
+        const watchedIndex = WATCHED_VIDEO_MODES.indexOf(settings.watchedVideosMode);
+        const watchedLabel = WATCHED_VIDEO_MODE_LABELS[watchedIndex];
+
+        if (watchedSlider) {
+            watchedSlider.value = String(watchedIndex);
+            watchedSlider.setAttribute('aria-valuetext', watchedLabel);
+        }
+
+        if (watchedValue) {
+            watchedValue.textContent = watchedLabel;
+        }
 
         const slider = menu.querySelector('#ytc-column-slider');
         const value = menu.querySelector('#ytc-column-value');
@@ -1553,7 +1655,9 @@
 
         observer.observe(document.documentElement, {
             childList: true,
-            subtree: true
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['href', 'overlay-style', 'is-shorts']
         });
 
         window.addEventListener('yt-navigate-finish', scheduleCleanup);

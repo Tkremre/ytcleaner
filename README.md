@@ -42,7 +42,9 @@ If you miss the 2015-2016 style YouTube desktop experience, this script tries to
 - Hide the Shorts button from the left sidebar
 - Redirect `/shorts/` pages back to the YouTube homepage
 - Remove "Most relevant", recommendations, and similar noisy blocks from the Subscriptions page
-- Optionally dim videos that already have a watch-progress indicator
+- Optionally hide scheduled premieres and live streams from Subscriptions until they start
+- Choose whether to leave, dim, or hide videos with a watch-progress indicator
+- Optionally hide auto-generated YouTube Mix playlists without hiding regular playlists
 - Switch between automatic YouTube columns and a manual grid
 - Use a slider from 1 to 8 video thumbnails per row
 - Show dislike counts on watch pages with Return YouTube Dislike
@@ -111,9 +113,11 @@ Available settings:
 - **Shorts**
   - Hide or keep Shorts across feeds, navigation, and direct Shorts pages
 - **Browsing**
-  - Dim videos that already have a watch-progress indicator
+  - Choose Off, Dim, or Hide for videos with a watch-progress indicator
+  - Hide auto-generated YouTube Mix playlists from feeds, search results, and recommendations
 - **Subscriptions**
   - Enable or disable noisy subscription section hiding
+  - Hide upcoming premieres and scheduled live streams until they start
 - **Layout**
   - Use YouTube automatic columns
   - Choose 1 to 8 thumbnails per row with the slider
@@ -121,6 +125,8 @@ Available settings:
   - Enable or disable dislike counts on watch pages
 
 Your settings are saved locally in your browser.
+
+Watched-video detection uses the progress indicator shown on YouTube thumbnails. Videos without that indicator remain visible, even if they appear in your watch history.
 
 No account, server, or custom backend is used by YouTube Cleaner.
 
@@ -132,8 +138,10 @@ For a desktop experience closer to older YouTube layouts:
 
 - Cleaner: enabled
 - Hide Shorts: enabled
-- Dim watched videos: optional
+- Watched videos: Dim (or Hide if you prefer not to see them at all)
+- Hide YouTube Mixes: optional
 - Hide noisy subscription sections: enabled
+- Hide upcoming videos: optional
 - Automatic grid: disabled
 - Manual columns: 5
 
@@ -265,6 +273,15 @@ YouTube-Cleaner.user.js
 
 ## Changelog
 
+### 1.2.0
+
+- Replaced the two watched-video switches with an **Off / Dim / Hide** slider, preserving saved choices
+- Added an optional **Hide YouTube Mixes** setting without affecting regular playlists
+- Added an optional Subscriptions filter for upcoming videos
+- Extended watched-video handling to compact video cards and both supported progress-overlay renderers
+- Reclassified Shorts cards when YouTube changes their links, and hid collapsible Shorts navigation entries completely
+- Corrected the settings button's accessibility state so it only reports whether its menu is open
+
 ### 1.1.0
 
 - Added an optional **Dim watched videos** setting based on YouTube's watch-progress renderers
@@ -321,6 +338,8 @@ YouTube-Cleaner.user.js
 ## Contribution
 
 Suggestions, bug reports, and improvements are welcome.
+
+Run the dependency-free userscript checks with `node --test` before submitting changes.
 
 You can contribute by opening an issue or creating a pull request.
 
