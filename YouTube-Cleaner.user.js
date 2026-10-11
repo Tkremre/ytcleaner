@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Cleaner - Hide Shorts & Clean Layout
 // @namespace    https://github.com/Tkremre/ytcleaner
-// @version      1.2.0
+// @version      1.3.0
 // @description  Hide Shorts, watched videos, and Mixes; clean subscriptions, customize the grid, and optionally show dislikes.
 // @author       Tkremre
 // @license      MIT
@@ -31,6 +31,9 @@
         hideShorts: true,
         watchedVideosMode: 'off',
         hideMixes: false,
+        hidePlayables: false,
+        hideHomeShelves: false,
+        hidePaidPromotion: false,
         hideSubscriptionSections: true,
         hideUpcomingVideos: false,
         showDislikes: false
@@ -104,6 +107,15 @@
             loaded.hideMixes = typeof loaded.hideMixes === 'boolean'
                 ? loaded.hideMixes
                 : DEFAULTS.hideMixes;
+            loaded.hidePlayables = typeof loaded.hidePlayables === 'boolean'
+                ? loaded.hidePlayables
+                : DEFAULTS.hidePlayables;
+            loaded.hideHomeShelves = typeof loaded.hideHomeShelves === 'boolean'
+                ? loaded.hideHomeShelves
+                : DEFAULTS.hideHomeShelves;
+            loaded.hidePaidPromotion = typeof loaded.hidePaidPromotion === 'boolean'
+                ? loaded.hidePaidPromotion
+                : DEFAULTS.hidePaidPromotion;
             loaded.hideSubscriptionSections = typeof loaded.hideSubscriptionSections === 'boolean'
                 ? loaded.hideSubscriptionSections
                 : DEFAULTS.hideSubscriptionSections;
@@ -718,6 +730,7 @@
     }
 
     function cleanPage() {
+        updateWatchedVideosState();
         runCleanupTask('Shorts redirect', redirectShortsPage);
 
         if (!settings.enabled) {
@@ -794,14 +807,24 @@
         });
     }
 
+    function updateWatchedVideosState() {
+        // Keep History useful without changing the user's saved browsing preference.
+        const isHistory = /^\/feed\/history\/?$/.test(location.pathname);
+        document.documentElement.dataset.ytcWatchedVideos =
+            settings.enabled && !isHistory ? settings.watchedVideosMode : 'off';
+    }
+
     function applyState() {
         const root = document.documentElement;
 
         root.dataset.ytcEnabled = settings.enabled ? 'true' : 'false';
         root.dataset.ytcHideShorts =
             settings.enabled && settings.hideShorts ? 'true' : 'false';
-        root.dataset.ytcWatchedVideos = settings.enabled ? settings.watchedVideosMode : 'off';
+        updateWatchedVideosState();
         root.dataset.ytcHideMixes = settings.enabled && settings.hideMixes ? 'true' : 'false';
+        root.dataset.ytcHidePlayables = settings.enabled && settings.hidePlayables ? 'true' : 'false';
+        root.dataset.ytcHideHomeShelves = settings.enabled && settings.hideHomeShelves ? 'true' : 'false';
+        root.dataset.ytcHidePaidPromotion = settings.enabled && settings.hidePaidPromotion ? 'true' : 'false';
         root.dataset.ytcHideUpcoming =
             settings.enabled && settings.hideUpcomingVideos ? 'true' : 'false';
         root.dataset.ytcColumns =
@@ -846,22 +869,38 @@
                 display: none !important;
             }
 
-            html[data-ytc-watched-videos="hide"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model):has(:is(ytd-thumbnail-overlay-resume-playback-renderer, yt-thumbnail-overlay-progress-bar-view-model)) {
+            html[data-ytc-watched-videos="hide"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model):not(ytd-browse[page-subtype="history"] *):has(:is(ytd-thumbnail-overlay-resume-playback-renderer, yt-thumbnail-overlay-progress-bar-view-model)) {
                 display: none !important;
             }
 
-            html[data-ytc-watched-videos="dim"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model):has(:is(ytd-thumbnail-overlay-resume-playback-renderer, yt-thumbnail-overlay-progress-bar-view-model)) {
+            html[data-ytc-watched-videos="dim"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model):not(ytd-browse[page-subtype="history"] *):has(:is(ytd-thumbnail-overlay-resume-playback-renderer, yt-thumbnail-overlay-progress-bar-view-model)) {
                 opacity: .5;
                 transition: opacity .15s ease;
             }
 
-            html[data-ytc-watched-videos="dim"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model):has(:is(ytd-thumbnail-overlay-resume-playback-renderer, yt-thumbnail-overlay-progress-bar-view-model)):hover {
+            html[data-ytc-watched-videos="dim"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model):not(ytd-browse[page-subtype="history"] *):has(:is(ytd-thumbnail-overlay-resume-playback-renderer, yt-thumbnail-overlay-progress-bar-view-model)):hover {
                 opacity: 1;
             }
 
             html[data-ytc-hide-mixes="true"] :is(ytd-radio-renderer, ytd-compact-radio-renderer),
             html[data-ytc-hide-mixes="true"] ytd-rich-item-renderer:has(a[href$="start_radio=1"]),
             html[data-ytc-hide-mixes="true"] :is(ytd-search, #related) yt-lockup-view-model:has(a[href*="&start_radio=1&"], a[href$="&start_radio=1"]) {
+                display: none !important;
+            }
+
+            html[data-ytc-hide-playables="true"] ytd-rich-shelf-renderer[is-playables],
+            html[data-ytc-hide-playables="true"] :is(ytd-rich-section-renderer, ytd-rich-item-renderer, ytd-rich-shelf-renderer, grid-shelf-view-model, ytd-shelf-renderer):has(ytd-rich-shelf-renderer[is-playables], ytd-playable-tile-renderer, a[href^="/playables/"], a[href="/feed/playables"], a[href="/playables"]),
+            html[data-ytc-hide-playables="true"] :is(ytd-guide-entry-renderer, ytd-mini-guide-entry-renderer, ytd-guide-collapsible-entry-renderer):has(a[href="/feed/playables"], a[href^="/playables"]) {
+                display: none !important;
+            }
+
+            /* Only grouped video shelves on Home; Shorts and games have their own settings. */
+            html[data-ytc-hide-home-shelves="true"] ytd-browse[page-subtype="home"] :is(ytd-rich-section-renderer, ytd-rich-shelf-renderer, grid-shelf-view-model, ytd-shelf-renderer):not([is-shorts], [is-playables]):not(:has(ytd-rich-shelf-renderer[is-shorts], ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2, a[href^="/shorts/"], ytd-rich-shelf-renderer[is-playables], ytd-playable-tile-renderer, a[href^="/playables"], a[href^="/feed/playables"])):has(ytd-rich-grid-media, ytd-video-renderer, ytd-grid-video-renderer, yt-lockup-view-model) {
+                display: none !important;
+            }
+
+            /* Target the promotion label, keeping other preview controls and the main player intact. */
+            html[data-ytc-hide-paid-promotion="true"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model, ytd-thumbnail, yt-thumbnail-view-model, ytd-video-preview, #inline-player, .ytp-inline-preview-mode) :is(.ytp-paid-content-overlay, .ytmPaidContentOverlayHost, .YtmPaidContentOverlayHost, ytm-paid-content-overlay-renderer, a[href^="https://support.google.com/youtube"][href*="p=ppp"]) {
                 display: none !important;
             }
 
@@ -1293,7 +1332,7 @@
         const value = createNode('div', 'ytc-slider-value');
         value.id = 'ytc-watched-mode-value';
 
-        const help = createNode('div', 'ytc-help', 'Based on thumbnail watch progress');
+        const help = createNode('div', 'ytc-help', 'Based on thumbnail watch progress; never applied to History');
         const slider = createNode('input', 'ytc-slider');
         slider.id = 'ytc-watched-mode-slider';
         slider.type = 'range';
@@ -1468,6 +1507,21 @@
                 'Hide YouTube Mixes',
                 'Remove auto-generated Mix playlists from feeds and results',
                 'hideMixes'
+            ),
+            createSwitchRow(
+                'Hide YouTube games',
+                'Remove Playables shelves and sidebar entries',
+                'hidePlayables'
+            ),
+            createSwitchRow(
+                'Hide home shelves',
+                'Remove grouped recommendations, such as music selections',
+                'hideHomeShelves'
+            ),
+            createSwitchRow(
+                'Hide promotion labels',
+                'Remove clickable paid-promotion labels from thumbnail previews',
+                'hidePaidPromotion'
             )
         );
 
@@ -1660,9 +1714,12 @@
             attributeFilter: ['href', 'overlay-style', 'is-shorts']
         });
 
-        window.addEventListener('yt-navigate-finish', scheduleCleanup);
-        window.addEventListener('yt-page-data-updated', scheduleCleanup);
-        window.addEventListener('popstate', scheduleCleanup);
+        ['yt-navigate-finish', 'yt-page-data-updated', 'popstate'].forEach((eventName) => {
+            window.addEventListener(eventName, () => {
+                updateWatchedVideosState();
+                scheduleCleanup();
+            });
+        });
         window.addEventListener('load', scheduleCleanup);
         window.addEventListener('resize', positionMenu);
         window.addEventListener('scroll', positionMenu, true);

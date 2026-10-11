@@ -13,10 +13,12 @@ const instrumentedSource = source.replace(
 
 assert.notEqual(instrumentedSource, source, 'Userscript entry point not found');
 
-function createHarness(savedSettings = {}) {
+function createHarness(savedSettings = {}, pathname = '/') {
     let css = '';
     let observerOptions;
     let savedValue;
+    const windowListeners = {};
+    const location = { pathname, search: '', replace() {} };
     const root = { dataset: {} };
 
     class FakeElement {
@@ -53,7 +55,7 @@ function createHarness(savedSettings = {}) {
         Intl,
         URLSearchParams,
         navigator: { language: 'en-US' },
-        location: { pathname: '/', search: '', replace() {} },
+        location,
         localStorage: {
             getItem() { return JSON.stringify(savedSettings); },
             setItem(_key, value) { savedValue = value; }
@@ -67,7 +69,7 @@ function createHarness(savedSettings = {}) {
         },
         window: {
             setTimeout() { return 1; },
-            addEventListener() {}
+            addEventListener(name, listener) { windowListeners[name] = listener; }
         },
         MutationObserver: class {
             observe(_target, options) { observerOptions = options; }
@@ -84,6 +86,8 @@ function createHarness(savedSettings = {}) {
         hooks: context.ytcTest,
         FakeElement,
         observerOptions,
+        location,
+        windowListeners,
         getSavedValue: () => savedValue
     };
 }
@@ -130,6 +134,26 @@ test('three-state slider changes and persists the watched-video mode', () => {
     assert.equal(harness.root.dataset.ytcWatchedVideos, 'hide');
     assert.equal(slider.attributes['aria-valuetext'], 'Hide');
     assert.equal(JSON.parse(harness.getSavedValue()).watchedVideosMode, 'hide');
+});
+
+test('History keeps watched videos visible and restores the saved mode after navigation', () => {
+    for (const mode of ['dim', 'hide']) {
+        const harness = createHarness({ watchedVideosMode: mode }, '/feed/history');
+        assert.equal(harness.root.dataset.ytcWatchedVideos, 'off');
+        assert.equal(harness.hooks.getSettings().watchedVideosMode, mode);
+
+        harness.location.pathname = '/feed/subscriptions';
+        harness.windowListeners['yt-navigate-finish']();
+        assert.equal(harness.root.dataset.ytcWatchedVideos, mode);
+
+        harness.location.pathname = '/feed/history/';
+        harness.windowListeners.popstate();
+        assert.equal(harness.root.dataset.ytcWatchedVideos, 'off');
+
+        harness.location.pathname = '/';
+        harness.windowListeners['yt-page-data-updated']();
+        assert.equal(harness.root.dataset.ytcWatchedVideos, mode);
+    }
 });
 
 test('hide rule covers supported video cards and progress indicators', () => {

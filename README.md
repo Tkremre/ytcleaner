@@ -45,6 +45,9 @@ If you miss the 2015-2016 style YouTube desktop experience, this script tries to
 - Optionally hide scheduled premieres and live streams from Subscriptions until they start
 - Choose whether to leave, dim, or hide videos with a watch-progress indicator
 - Optionally hide auto-generated YouTube Mix playlists without hiding regular playlists
+- Optionally hide YouTube Playables game shelves and sidebar entries
+- Optionally hide grouped homepage recommendations, including music selections
+- Optionally hide clickable paid-promotion labels on thumbnail previews
 - Switch between automatic YouTube columns and a manual grid
 - Use a slider from 1 to 8 video thumbnails per row
 - Show dislike counts on watch pages with Return YouTube Dislike
@@ -115,6 +118,9 @@ Available settings:
 - **Browsing**
   - Choose Off, Dim, or Hide for videos with a watch-progress indicator
   - Hide auto-generated YouTube Mix playlists from feeds, search results, and recommendations
+  - Hide YouTube games (Playables shelves and sidebar entries)
+  - Hide grouped home shelves, such as music selections
+  - Hide paid-promotion labels on thumbnail previews
 - **Subscriptions**
   - Enable or disable noisy subscription section hiding
   - Hide upcoming premieres and scheduled live streams until they start
@@ -126,7 +132,9 @@ Available settings:
 
 Your settings are saved locally in your browser.
 
-Watched-video detection uses the progress indicator shown on YouTube thumbnails. Videos without that indicator remain visible, even if they appear in your watch history.
+Watched-video detection uses the progress indicator shown on YouTube thumbnails. Videos without that indicator remain visible, even if they appear in your watch history. The watched-video filter is automatically disabled on History, while your saved Off / Dim / Hide preference still applies on other pages.
+
+The games, home shelves, and promotion-label filters are disabled by default. Home shelf filtering only affects grouped video recommendations on the homepage; channel pages and search results are unaffected. Shorts and Playables remain controlled by their own settings. Promotion-label filtering affects thumbnail previews and leaves the disclosure in the main video player visible.
 
 No account, server, or custom backend is used by YouTube Cleaner.
 
@@ -273,6 +281,13 @@ YouTube-Cleaner.user.js
 
 ## Changelog
 
+### 1.3.0
+
+- Excluded History from watched-video dimming and hiding, including navigation without a page reload
+- Added optional filters for YouTube Playables and grouped homepage video shelves, including music selections
+- Added an optional filter for clickable paid-promotion labels on thumbnail previews, preserving other preview controls
+- Added browser regression checks for page navigation, independent filters, and settings persistence
+
 ### 1.2.0
 
 - Replaced the two watched-video switches with an **Off / Dim / Hide** slider, preserving saved choices
@@ -340,6 +355,8 @@ YouTube-Cleaner.user.js
 Suggestions, bug reports, and improvements are welcome.
 
 Run the dependency-free userscript checks with `node --test` before submitting changes.
+
+For browser checks, `tests/browser-regressions.cjs` exports an async function accepting a Playwright `page` and the userscript source. It runs on an isolated fixture page and checks History navigation, filter independence, preview clicks, and saved settings.
 
 You can contribute by opening an issue or creating a pull request.
 
