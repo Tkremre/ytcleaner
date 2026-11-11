@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Cleaner - Hide Shorts & Clean Layout
 // @namespace    https://github.com/Tkremre/ytcleaner
-// @version      1.3.0
+// @version      1.4.0
 // @description  Hide Shorts, watched videos, and Mixes; clean subscriptions, customize the grid, and optionally show dislikes.
 // @author       Tkremre
 // @license      MIT
@@ -36,14 +36,23 @@
         hidePaidPromotion: false,
         hideSubscriptionSections: true,
         hideUpcomingVideos: false,
+        hideUnsubscribedCollaborations: false,
         showDislikes: false
     };
 
     const VALID_COLUMNS = ['1', '2', '3', '4', '5', '6', '7', '8'];
     const WATCHED_VIDEO_MODES = ['off', 'dim', 'hide'];
     const WATCHED_VIDEO_MODE_LABELS = ['Off', 'Dim', 'Hide'];
+    const EXPERIMENTAL_SETTINGS = {
+        hideHomeShelves: 'Grouped recommendations vary between YouTube layouts.',
+        hideUpcomingVideos: 'Upcoming-video indicators can vary between YouTube layouts.',
+        hideUnsubscribedCollaborations: 'Uses YouTube subscription and uploader metadata that can change.'
+    };
     const HIDDEN_SHORTS_CLASS = 'ytc-hidden-shorts';
     const HIDDEN_SUBSCRIPTIONS_CLASS = 'ytc-hidden-subscriptions';
+    const HIDDEN_COLLABORATIONS_CLASS = 'ytc-hidden-collaboration';
+    const COLLABORATION_MARKER = 'yt-avatar-stack-view-model, [aria-label="Collaboration channels"]';
+    const COLLABORATION_CACHE_TTL = 5 * 60 * 1000;
     const DISLIKE_CACHE_MAX_SIZE = 100;
 
     const SUBSCRIPTION_NOISE_CONTAINER_SELECTOR = [
@@ -70,6 +79,12 @@
     let lastDislikeRefreshAt = 0;
     const dislikeCache = new Map();
     const reportedCleanupErrors = new Set();
+    let collaborationSubscriptions = null;
+    let collaborationRequest = null;
+    let collaborationRetryAt = 0;
+    let collaborationStatus = '';
+    let currentMenuTab = 'videos';
+    const collaborationUploaders = new Map();
 
     function loadSettings() {
         try {
@@ -122,6 +137,9 @@
             loaded.hideUpcomingVideos = typeof loaded.hideUpcomingVideos === 'boolean'
                 ? loaded.hideUpcomingVideos
                 : DEFAULTS.hideUpcomingVideos;
+            loaded.hideUnsubscribedCollaborations = typeof loaded.hideUnsubscribedCollaborations === 'boolean'
+                ? loaded.hideUnsubscribedCollaborations
+                : DEFAULTS.hideUnsubscribedCollaborations;
             loaded.showDislikes = typeof loaded.showDislikes === 'boolean'
                 ? loaded.showDislikes
                 : DEFAULTS.showDislikes;
@@ -282,6 +300,379 @@
 
     function isWatchPage() {
         return location.pathname === '/watch';
+    }
+
+    // Parse JSON only: fetched watch pages must never execute scripts or start playback.
+    function readEmbeddedJson(html, marker) {
+        const match = marker.exec(html);
+        if (!match) return null;
+        const start = match.index + match[0].length;
+        if (html[start] !== '{') return null;
+        let depth = 0;
+        let quoted = false;
+        let escaped = false;
+        for (let index = start; index < html.length; index++) {
+            const char = html[index];
+            if (quoted) {
+                if (escaped) escaped = false;
+                else if (char === '\\') escaped = true;
+                else if (char === '"') quoted = false;
+            } else if (char === '"') {
+                quoted = true;
+            } else if (char === '{') {
+                depth++;
+            } else if (char === '}' && --depth === 0) {
+                try { return JSON.parse(html.slice(start, index + 1)); } catch { return null; }
+            }
+        }
+        return null;
+    }
+
+    function dataObjects(root, key) {
+        const results = [];
+        const pending = [root];
+        while (pending.length) {
+            const node = pending.pop();
+            if (!node || typeof node !== 'object') continue;
+            if (node[key]) results.push(node[key]);
+            pending.push(...Object.values(node).filter((value) => value && typeof value === 'object'));
+        }
+        return results;
+    }
+
+    function collaborationConfig(html) {
+        const marker = /ytcfg\.set\s*\(\s*/g;
+        while (marker.lastIndex < html.length) {
+            const config = readEmbeddedJson(html, marker);
+            // Real pages call set('EMERGENCY_BASE_URL', ...) before the JSON config.
+            // Skip non-JSON calls; a failed regex search resets lastIndex to zero.
+            if (!config) {
+                if (marker.lastIndex === 0) break;
+                continue;
+            }
+            if (config.INNERTUBE_CONTEXT?.client?.clientVersion) return config;
+        }
+        return null;
+    }
+
+    function collaborationSessionHeaders(config) {
+        const headers = {};
+        if (/^\d+$/.test(String(config?.SESSION_INDEX ?? ''))) {
+            headers['X-Goog-AuthUser'] = String(config.SESSION_INDEX);
+        }
+        if (/^\d+$/.test(config?.DELEGATED_SESSION_ID || '')) {
+            headers['X-Goog-PageId'] = String(config.DELEGATED_SESSION_ID);
+        }
+        return headers;
+    }
+
+    function collaborationDataError(code, message, details = {}) {
+        const error = new Error(message);
+        error.code = code;
+        error.details = details;
+        return error;
+    }
+
+    async function fetchCollaborationData(path, signal, body, headers = {}) {
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted) controller.abort();
+        const timeout = setTimeout(abort, 12000);
+        try {
+            const response = await fetch(path, {
+                credentials: 'same-origin',
+                cache: 'no-store',
+                redirect: 'error',
+                signal: controller.signal,
+                headers: { ...headers, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+                ...(body ? {
+                    method: 'POST',
+                    body: JSON.stringify(body)
+                } : {})
+            });
+            if (!response.ok) {
+                const error = new Error('YouTube metadata request failed');
+                error.status = response.status;
+                error.code = 'YTC_HTTP_' + response.status;
+                throw error;
+            }
+            return body ? await response.json() : await response.text();
+        } finally {
+            clearTimeout(timeout);
+            signal.removeEventListener('abort', abort);
+        }
+    }
+
+    async function loadCollaborationSubscriptions(signal, sessionHeaders = {}) {
+        const authUser = sessionHeaders['X-Goog-AuthUser'];
+        const html = await fetchCollaborationData(
+            '/feed/channels' + (authUser ? '?authuser=' + encodeURIComponent(authUser) : ''),
+            signal, null, sessionHeaders
+        );
+        const data = readEmbeddedJson(html, /(?:ytInitialData|window\[\s*["']ytInitialData["']\s*\])\s*=\s*/);
+        if (!data) {
+            throw collaborationDataError('YTC_SUBS_DATA', 'YouTube subscription data was not found in the response');
+        }
+        if (data?.responseContext?.mainAppWebResponseContext?.loggedOut === true) {
+            throw new Error('YouTube subscriptions unavailable');
+        }
+        const tabs = data?.contents?.twoColumnBrowseResultsRenderer?.tabs || [];
+        const tab = tabs.find((entry) => entry.tabRenderer?.selected)?.tabRenderer ||
+            (tabs.length === 1 ? tabs[0].tabRenderer : null);
+        let page = tab?.content;
+        if (!page) {
+            throw collaborationDataError('YTC_SUBS_CONTENT', 'The subscription content was not found', {
+                tabCount: tabs.length,
+                contentKeys: Object.keys(data.contents || {}).slice(0, 8)
+            });
+        }
+        const config = collaborationConfig(html);
+        const responseHeaders = collaborationSessionHeaders(config);
+        for (const name of Object.keys(sessionHeaders)) {
+            if (sessionHeaders[name] !== responseHeaders[name]) {
+                throw new Error('YouTube account did not match the active page');
+            }
+        }
+        sessionHeaders = responseHeaders;
+        const context = config?.INNERTUBE_CONTEXT;
+        const apiKey = typeof config?.INNERTUBE_API_KEY === 'string' ? config.INNERTUBE_API_KEY : '';
+        const ids = new Set();
+        const tokens = new Set();
+        for (let count = 0; count < 100; count++) {
+            if (dataObjects(page, 'nextContinuationData').length ||
+                dataObjects(page, 'reloadContinuationData').length ||
+                dataObjects(page, 'channelListItemViewModel').length ||
+                dataObjects(page, 'lockupViewModel').some((item) => item.contentType === 'LOCKUP_CONTENT_TYPE_CHANNEL')) {
+                throw collaborationDataError('YTC_SUBS_LAYOUT', 'Unsupported YouTube subscription pagination or channel format', {
+                    page: count + 1,
+                    hasLegacyContinuation: dataObjects(page, 'nextContinuationData').length > 0,
+                    hasChannelListItems: dataObjects(page, 'channelListItemViewModel').length > 0,
+                    hasChannelLockups: dataObjects(page, 'lockupViewModel').some((item) => item.contentType === 'LOCKUP_CONTENT_TYPE_CHANNEL')
+                });
+            }
+            const channels = dataObjects(page, 'channelRenderer');
+            if (!channels.length) {
+                throw collaborationDataError('YTC_SUBS_CHANNELS', 'Incomplete YouTube subscription list', {
+                    page: count + 1, channelsLoaded: ids.size,
+                    payloadKeys: Object.keys(page || {}).slice(0, 8)
+                });
+            }
+            for (const channel of channels) {
+                if (!/^UC[\w-]{22}$/.test(channel.channelId || '')) {
+                    throw new Error('Unknown YouTube channel format');
+                }
+                ids.add(channel.channelId);
+            }
+            const continuations = dataObjects(page, 'continuationItemRenderer');
+            // Sort/filter menus also contain continuationCommand objects.
+            // Only continuation items in the list indicate another page to fetch.
+            if (!continuations.length) return ids;
+            const token = continuations[0]?.continuationEndpoint?.continuationCommand?.token;
+            if (continuations.length !== 1 || !token || tokens.has(token) || !context) {
+                throw collaborationDataError('YTC_SUBS_PAGINATION', 'Incomplete YouTube subscription pagination', {
+                    page: count + 1, channelsLoaded: ids.size,
+                    continuationCount: continuations.length,
+                    hasToken: Boolean(token), repeatedToken: tokens.has(token), hasContext: Boolean(context)
+                });
+            }
+            tokens.add(token);
+            const response = await fetchCollaborationData(
+                '/youtubei/v1/browse' + (apiKey ? '?key=' + encodeURIComponent(apiKey) : ''),
+                signal, { context, continuation: token }, sessionHeaders
+            );
+            if (response.responseContext?.mainAppWebResponseContext?.loggedOut === true) {
+                throw new Error('YouTube session changed');
+            }
+            // Only the continuation payload, never sidebar or suggested channels.
+            page = response.onResponseReceivedActions || response.onResponseReceivedEndpoints ||
+                response.continuationContents;
+        }
+        throw new Error('YouTube subscription pagination limit reached');
+    }
+
+    async function lookupCollaborationUploader(videoId, signal, sessionHeaders = {}, context = null) {
+        const uploaderId = (player) => {
+            const details = player?.videoDetails;
+            return details?.videoId === videoId && /^UC[\w-]{22}$/.test(details.channelId || '')
+                ? details.channelId : null;
+        };
+        if (context?.client?.clientVersion) {
+            try {
+                // Fetch only the two IDs we need, not a complete watch page or media.
+                const player = await fetchCollaborationData(
+                    '/youtubei/v1/player?prettyPrint=false&fields=videoDetails(videoId,channelId)',
+                    signal, { context, videoId }, sessionHeaders
+                );
+                const channelId = uploaderId(player);
+                if (channelId) return channelId;
+            } catch (error) {
+                if (signal.aborted || error.status === 429 || error.status === 403) throw error;
+                // Fall back to watch-page metadata for unsupported player responses.
+            }
+        }
+        const authUser = sessionHeaders['X-Goog-AuthUser'];
+        const html = await fetchCollaborationData(
+            '/watch?v=' + encodeURIComponent(videoId) + (authUser ? '&authuser=' + encodeURIComponent(authUser) : ''),
+            signal, null, sessionHeaders
+        );
+        const player = readEmbeddedJson(html, /(?:ytInitialPlayerResponse|window\[\s*["']ytInitialPlayerResponse["']\s*\])\s*=\s*/);
+        return uploaderId(player);
+    }
+
+    function collaborationFilterActive() {
+        return settings.enabled && settings.hideUnsubscribedCollaborations && isSubscriptionsPage();
+    }
+
+    function setCollaborationStatus(message) {
+        collaborationStatus = message;
+        const status = document.getElementById('ytc-collaboration-status');
+        if (!status) return;
+        status.hidden = !message;
+        if (status.textContent !== message) status.textContent = message;
+    }
+
+    function collaborationFailureMessage(error) {
+        if (error.status === 429) return 'YouTube is rate limiting checks. Try again shortly.';
+        if (error.status === 401 || error.status === 403) return 'YouTube denied access to subscriptions. Reload YouTube to retry.';
+        if (/account|session/i.test(error.message)) return 'Could not verify the active YouTube account. Reload YouTube to retry.';
+        if (/pagination|continuation|Incomplete/i.test(error.message)) return 'The complete subscription list could not be loaded. Reload YouTube to retry.';
+        if (/format/i.test(error.message)) return 'This YouTube subscription layout could not be read.';
+        return 'Could not read subscriptions. Reload YouTube to retry.';
+    }
+
+    function resetCollaborationFilter() {
+        collaborationRequest?.abort();
+        collaborationRequest = null;
+        collaborationSubscriptions = null;
+        collaborationRetryAt = 0;
+        collaborationUploaders.clear();
+        unhideElements(HIDDEN_COLLABORATIONS_CLASS);
+        setCollaborationStatus('');
+    }
+
+    function collaborationVideoId(card) {
+        for (const link of queryAll('a[href]', card)) {
+            try {
+                const url = new URL(link.getAttribute('href'), location.href);
+                const id = url.searchParams.get('v');
+                if (url.origin === location.origin && url.pathname === '/watch' && /^[\w-]{11}$/.test(id || '')) {
+                    return id;
+                }
+            } catch { /* Keep cards with unknown links visible. */ }
+        }
+        return '';
+    }
+
+    function hideUnsubscribedCollaborations() {
+        document.documentElement.dataset.ytcHideUnsubscribedCollaborations =
+            collaborationFilterActive() ? 'true' : 'false';
+        if (!collaborationFilterActive()) {
+            resetCollaborationFilter();
+            return;
+        }
+        if (document.hidden) return;
+        for (const [videoId, cached] of collaborationUploaders) {
+            if (cached.expiresAt <= Date.now()) collaborationUploaders.delete(videoId);
+        }
+        const subscriptions = collaborationSubscriptions?.expiresAt > Date.now()
+            ? collaborationSubscriptions.ids : null;
+        const pending = new Set();
+        let hasCandidates = false;
+        let hiddenCount = 0;
+        let unknownCount = 0;
+        const selector = 'ytd-browse[page-subtype="subscriptions"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, yt-lockup-view-model)';
+        queryAll(selector).forEach((card) => {
+            // Modern lockups can be nested in rich items; classify the outer card once.
+            if (card.matches('yt-lockup-view-model') && card.closest('ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer')) return;
+            const videoId = card.querySelector(COLLABORATION_MARKER) ? collaborationVideoId(card) : '';
+            if (videoId) hasCandidates = true;
+            const cached = collaborationUploaders.get(videoId);
+            const known = cached?.expiresAt > Date.now();
+            const hide = Boolean(
+                videoId && subscriptions && known && cached.channelId && !subscriptions.has(cached.channelId)
+            );
+            card.classList.toggle(HIDDEN_COLLABORATIONS_CLASS, hide);
+            if (hide) hiddenCount++;
+            if (videoId && known && !cached.channelId) unknownCount++;
+            if (videoId && !known) pending.add(videoId);
+        });
+        if (!hasCandidates) {
+            setCollaborationStatus('No collaboration videos detected on this page.');
+            return;
+        }
+        if (collaborationRequest || Date.now() < collaborationRetryAt) return;
+        if (subscriptions && !pending.size) {
+            setCollaborationStatus(
+                hiddenCount + ' collaboration videos hidden · ' + subscriptions.size + ' subscribed channels checked' +
+                (unknownCount ? ' · ' + unknownCount + ' videos could not be verified' : '')
+            );
+            return;
+        }
+        const controller = new AbortController();
+        collaborationRequest = controller;
+        setCollaborationStatus(subscriptions ? 'Checking video uploaders…' : 'Loading your subscribed channels…');
+        (async () => {
+            let config = null;
+            for (const script of queryAll('script:not([src])')) {
+                config = collaborationConfig(script.textContent || '');
+                if (config) break;
+            }
+            const sessionHeaders = collaborationSessionHeaders(config);
+            const authUser = new URLSearchParams(location.search).get('authuser');
+            if (/^\d+$/.test(authUser || '')) sessionHeaders['X-Goog-AuthUser'] = authUser;
+            if (!subscriptions) {
+                const ids = await loadCollaborationSubscriptions(controller.signal, sessionHeaders);
+                if (controller.signal.aborted) return;
+                collaborationSubscriptions = { ids, expiresAt: Date.now() + COLLABORATION_CACHE_TTL };
+                setCollaborationStatus(ids.size + ' subscribed channels loaded. Checking video uploaders…');
+            }
+            const queue = [...pending];
+            let next = 0;
+            const worker = async () => {
+                while (next < queue.length && !controller.signal.aborted && !document.hidden) {
+                    const videoId = queue[next++];
+                    let channelId = null;
+                    try {
+                        channelId = await lookupCollaborationUploader(videoId, controller.signal, sessionHeaders, config?.INNERTUBE_CONTEXT);
+                    } catch (error) {
+                        // Stop new lookups if YouTube is throttling or rejecting this session.
+                        if (error.status === 429 || error.status === 403) {
+                            collaborationRetryAt = Date.now() + 60000;
+                            setCollaborationStatus('YouTube temporarily blocked metadata checks. Unverified videos remain visible.');
+                            next = queue.length;
+                        }
+                    }
+                    if (controller.signal.aborted) return;
+                    collaborationUploaders.set(videoId, {
+                        channelId,
+                        expiresAt: Date.now() + (channelId ? COLLABORATION_CACHE_TTL : 60000)
+                    });
+                    // Update resolved cards without waiting for all metadata requests.
+                    scheduleCleanup();
+                }
+            };
+            await Promise.all([worker(), worker()]);
+            reportedCleanupErrors.delete('Collaboration filter');
+        })().catch((error) => {
+            if (controller.signal.aborted) return;
+            collaborationSubscriptions = null;
+            collaborationRetryAt = Date.now() + 60000;
+            setCollaborationStatus(collaborationFailureMessage(error) + (error.code ? ' [' + error.code + ']' : ''));
+            if (!reportedCleanupErrors.has('Collaboration filter')) {
+                reportedCleanupErrors.add('Collaboration filter');
+                // Diagnostic structure only: no channel IDs, cookies, config, or continuation tokens.
+                console.warn('[YouTube Cleaner] Could not verify subscriptions; collaboration videos remain visible.', {
+                    code: error.code || 'YTC_SUBS_REQUEST',
+                    reason: error.message,
+                    ...error.details
+                });
+            }
+        }).finally(() => {
+            if (collaborationRequest !== controller) return;
+            collaborationRequest = null;
+            scheduleCleanup();
+        });
     }
 
     function getCurrentVideoId() {
@@ -731,6 +1122,7 @@
 
     function cleanPage() {
         updateWatchedVideosState();
+        runCleanupTask('Collaboration filter', hideUnsubscribedCollaborations);
         runCleanupTask('Shorts redirect', redirectShortsPage);
 
         if (!settings.enabled) {
@@ -777,7 +1169,8 @@
 
         return mutations.some((mutation) => {
             if (mutation.type === 'attributes') {
-                return settings.enabled && settings.hideShorts &&
+                return settings.enabled && (settings.hideShorts ||
+                    (collaborationFilterActive() && mutation.attributeName === 'href')) &&
                     mutation.target instanceof Element &&
                     !mutation.target.closest(ownedSelector);
             }
@@ -827,11 +1220,15 @@
         root.dataset.ytcHidePaidPromotion = settings.enabled && settings.hidePaidPromotion ? 'true' : 'false';
         root.dataset.ytcHideUpcoming =
             settings.enabled && settings.hideUpcomingVideos ? 'true' : 'false';
+        root.dataset.ytcHideUnsubscribedCollaborations =
+            collaborationFilterActive() ? 'true' : 'false';
         root.dataset.ytcColumns =
             settings.enabled && !settings.automaticColumns ? settings.columns : 'auto';
 
         updateButtonState();
         updateMenuState();
+
+        if (!collaborationFilterActive()) resetCollaborationFilter();
 
         if (!settings.enabled || !settings.hideShorts) {
             unhideElements(HIDDEN_SHORTS_CLASS);
@@ -852,6 +1249,10 @@
         const css = `
             .ytc-hidden-shorts,
             .ytc-hidden-subscriptions {
+                display: none !important;
+            }
+
+            html[data-ytc-hide-unsubscribed-collaborations="true"] ytd-browse[page-subtype="subscriptions"] .ytc-hidden-collaboration {
                 display: none !important;
             }
 
@@ -1003,23 +1404,34 @@
             }
 
             #ytc-menu {
+                --ytc-surface: #fff;
+                --ytc-text: #171717;
+                --ytc-muted: #666;
+                --ytc-line: #e8e8e8;
+                --ytc-hover: #f5f5f5;
+                --ytc-accent: #e53945;
+                --ytc-lab: #95651c;
+                --ytc-switch-off: #aaa;
+                color-scheme: light;
                 position: fixed;
                 top: 58px;
                 right: 12px;
                 z-index: 2147483647;
-                width: 320px;
+                display: flex;
+                flex-direction: column;
+                width: 420px;
                 max-width: calc(100vw - 24px);
-                max-height: calc(100vh - 24px);
-                overflow-y: auto;
-                padding: 12px;
+                max-height: calc(100dvh - 80px);
+                overflow: hidden;
+                padding: 0;
                 border-radius: 12px;
-                background: #ffffff !important;
-                color: #0f0f0f !important;
-                box-shadow: 0 8px 28px rgba(0, 0, 0, .24);
-                border: 1px solid rgba(0, 0, 0, .12);
+                background: var(--ytc-surface) !important;
+                color: var(--ytc-text) !important;
+                box-shadow: 0 12px 36px rgba(0, 0, 0, .22), 0 2px 6px rgba(0, 0, 0, .08);
+                border: 1px solid var(--ytc-line);
                 font-family: Roboto, Arial, sans-serif;
                 font-size: 13px;
-                line-height: 1.35;
+                line-height: 1.4;
                 opacity: 1 !important;
                 backdrop-filter: none !important;
                 -webkit-backdrop-filter: none !important;
@@ -1027,13 +1439,20 @@
             }
 
             html[dark] #ytc-menu {
-                background: #282828 !important;
-                color: #f1f1f1 !important;
-                border-color: rgba(255, 255, 255, .12);
-                box-shadow: 0 8px 28px rgba(0, 0, 0, .55);
+                --ytc-surface: #212121;
+                --ytc-text: #f1f1f1;
+                --ytc-muted: #aaa;
+                --ytc-line: #383838;
+                --ytc-hover: #292929;
+                --ytc-accent: #ff5a62;
+                --ytc-lab: #d5ae6b;
+                --ytc-switch-off: #666;
+                color-scheme: dark;
+                box-shadow: 0 14px 40px rgba(0, 0, 0, .45);
             }
 
-            #ytc-menu[hidden] {
+            #ytc-menu[hidden],
+            #ytc-menu [hidden] {
                 display: none !important;
             }
 
@@ -1042,83 +1461,206 @@
                 box-sizing: border-box;
             }
 
-            .ytc-title {
-                font-size: 15px;
-                font-weight: 600;
-                margin-bottom: 12px;
-                color: inherit;
+            #ytc-menu .ytc-menu-header {
+                flex: 0 0 auto;
+                padding: 18px 20px 0;
             }
 
-            .ytc-section {
-                padding: 10px 0;
-                border-top: 1px solid rgba(0, 0, 0, .10);
-            }
-
-            html[dark] .ytc-section {
-                border-top-color: rgba(255, 255, 255, .12);
-            }
-
-            .ytc-title + .ytc-section {
-                border-top: 0;
-                padding-top: 0;
-            }
-
-            .ytc-section-title {
-                font-size: 11px;
-                font-weight: 700;
-                letter-spacing: 0;
-                text-transform: uppercase;
-                opacity: .68;
-                margin-bottom: 4px;
-                color: inherit;
-            }
-
-            .ytc-row {
+            #ytc-menu .ytc-brand {
                 display: flex;
                 align-items: center;
-                justify-content: space-between;
-                gap: 12px;
-                margin: 8px 0;
+                gap: 10px;
             }
 
-            .ytc-row > div:first-child {
+            #ytc-menu .ytc-brand-icon {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 32px;
+                height: 32px;
+                color: var(--ytc-accent);
+            }
+
+            #ytc-menu .ytc-brand-icon svg {
+                width: 28px;
+                height: 28px;
+            }
+
+            #ytc-menu .ytc-title {
+                font-size: 18px;
+                font-weight: 600;
+                letter-spacing: -.3px;
+                color: inherit;
+            }
+
+            #ytc-menu .ytc-close {
+                display: grid;
+                place-items: center;
+                width: 30px;
+                height: 30px;
+                margin-left: auto;
+                border: 0;
+                padding: 0;
+                border-radius: 6px;
+                background: transparent;
+                color: var(--ytc-muted);
+                cursor: pointer;
+            }
+
+            #ytc-menu .ytc-close:hover {
+                background: var(--ytc-hover);
+                color: var(--ytc-text);
+            }
+
+            #ytc-menu .ytc-close svg {
+                width: 18px;
+                height: 18px;
+            }
+
+            #ytc-menu .ytc-master.ytc-row {
+                align-items: center;
+                margin: 14px 0 10px;
+                padding: 10px 12px;
+                background: var(--ytc-hover);
+                border: 1px solid var(--ytc-line);
+                border-radius: 8px;
+            }
+
+            #ytc-menu .ytc-master .ytc-help {
+                font-size: 11px;
+                margin-top: 1px;
+            }
+
+            #ytc-menu .ytc-tabs {
+                display: flex;
+                flex: 0 0 auto;
+                gap: 22px;
+                padding: 0 20px;
+                border-bottom: 1px solid var(--ytc-line);
+            }
+
+            #ytc-menu .ytc-tab {
+                position: relative;
+                padding: 13px 0 11px;
+                border: 0;
+                background: transparent;
+                color: var(--ytc-muted);
+                font: inherit;
+                font-weight: 500;
+                cursor: pointer;
+            }
+
+            #ytc-menu .ytc-tab:hover,
+            #ytc-menu .ytc-tab[aria-selected="true"] {
+                color: var(--ytc-text);
+            }
+
+            #ytc-menu .ytc-tab[aria-selected="true"]::after {
+                position: absolute;
+                content: "";
+                bottom: -1px;
+                height: 2px;
+                left: 0;
+                right: 0;
+                background: var(--ytc-accent);
+            }
+
+            #ytc-menu .ytc-menu-body {
+                min-height: 0;
+                overflow-y: auto;
+                overscroll-behavior: contain;
+                scrollbar-width: thin;
+                padding: 0 20px;
+            }
+
+            #ytc-menu .ytc-section {
+                padding: 14px 0 8px;
+                border-top: 1px solid var(--ytc-line);
+            }
+
+            #ytc-menu .ytc-section:first-child {
+                border-top: 0;
+            }
+
+            #ytc-menu .ytc-section-title {
+                font-size: 10px;
+                font-weight: 600;
+                letter-spacing: 1px;
+                text-transform: uppercase;
+                color: var(--ytc-muted);
+                margin-bottom: 3px;
+            }
+
+            #ytc-menu .ytc-row {
+                display: flex;
+                align-items: flex-start;
+                justify-content: space-between;
+                gap: 12px;
+                margin: 0;
+                padding: 11px 0;
+            }
+
+            #ytc-menu .ytc-row > div:first-child {
                 min-width: 0;
             }
 
-            .ytc-label {
-                line-height: 1.3;
+            #ytc-menu .ytc-label {
+                display: flex;
+                align-items: center;
+                gap: 7px;
+                font-size: 13px;
+                font-weight: 500;
+                line-height: 1.4;
                 color: inherit;
             }
 
-            .ytc-help {
-                opacity: .72;
+            #ytc-menu .ytc-help {
                 font-size: 12px;
-                margin-top: 2px;
-                color: inherit;
+                line-height: 1.45;
+                margin-top: 3px;
+                color: var(--ytc-muted);
+            }
+
+            #ytc-menu #ytc-collaboration-status {
+                border-left: 2px solid var(--ytc-line);
+                padding-left: 8px;
+                margin-top: 9px;
+                font-size: 11px;
+                overflow-wrap: anywhere;
+            }
+
+            #ytc-menu .ytc-experimental {
+                display: inline-flex;
+                flex: 0 0 auto;
+                align-items: center;
+                color: var(--ytc-lab);
+                cursor: help;
+            }
+
+            #ytc-menu .ytc-experimental svg {
+                display: block;
+                width: 15px;
+                height: 15px;
             }
 
             #ytc-menu .ytc-switch {
-                width: 42px;
-                height: 24px;
-                border-radius: 999px;
+                width: 38px;
+                height: 22px;
+                margin: 1px 0 0;
+                border-radius: 11px;
                 border: 0;
                 cursor: pointer;
-                background: rgba(255, 255, 255, .18) !important;
+                background: var(--ytc-switch-off) !important;
                 position: relative;
                 flex: 0 0 auto;
                 padding: 0;
-                margin: 0;
-            }
-
-            html:not([dark]) #ytc-menu .ytc-switch {
-                background: rgba(0, 0, 0, .18) !important;
             }
 
             #ytc-menu .ytc-switch::after {
                 content: "";
                 position: absolute;
-                width: 18px;
-                height: 18px;
+                width: 16px;
+                height: 16px;
                 top: 3px;
                 left: 3px;
                 border-radius: 50%;
@@ -1127,17 +1669,29 @@
                 transition: transform .15s ease;
             }
 
-            html:not([dark]) #ytc-menu .ytc-switch::after {
-                background: #ffffff;
-            }
-
             #ytc-menu .ytc-switch[data-active="true"] {
-                background: #3ea6ff !important;
+                background: var(--ytc-accent) !important;
             }
 
             #ytc-menu .ytc-switch[data-active="true"]::after {
-                transform: translateX(18px);
+                transform: translateX(16px);
                 background: #ffffff;
+            }
+
+            #ytc-menu .ytc-master .ytc-switch {
+                width: 44px;
+                height: 24px;
+                border-radius: 12px;
+                margin: 0;
+            }
+
+            #ytc-menu .ytc-master .ytc-switch::after {
+                width: 18px;
+                height: 18px;
+            }
+
+            #ytc-menu .ytc-master .ytc-switch[data-active="true"]::after {
+                transform: translateX(20px);
             }
 
             #ytc-menu .ytc-switch:disabled {
@@ -1145,41 +1699,49 @@
                 opacity: .45;
             }
 
-            .ytc-slider-wrap {
-                margin: 10px 0 2px;
+            #ytc-menu .ytc-slider-wrap {
+                margin: 0;
+                padding: 12px 0;
             }
 
-            .ytc-slider-head {
+            #ytc-menu .ytc-slider-head {
                 display: flex;
-                align-items: baseline;
+                align-items: center;
                 justify-content: space-between;
                 gap: 12px;
-                margin-bottom: 8px;
+                margin-bottom: 4px;
             }
 
-            .ytc-slider-value {
+            #ytc-menu .ytc-slider-value {
                 font-size: 12px;
-                font-weight: 700;
-                color: #3ea6ff;
+                font-weight: 500;
+                color: var(--ytc-text);
                 white-space: nowrap;
+                font-variant-numeric: tabular-nums;
             }
 
-            .ytc-slider {
+            #ytc-menu .ytc-slider {
                 width: 100%;
-                accent-color: #3ea6ff;
+                margin: 12px 0 4px;
+                accent-color: var(--ytc-accent);
+                cursor: pointer;
             }
 
-            .ytc-slider:disabled {
+            #ytc-menu .ytc-slider:disabled {
                 cursor: not-allowed;
                 opacity: .45;
             }
 
-            .ytc-slider-scale {
+            #ytc-menu .ytc-slider-scale {
                 display: flex;
                 justify-content: space-between;
                 margin-top: 2px;
                 font-size: 11px;
-                opacity: .65;
+                color: var(--ytc-muted);
+            }
+
+            @media (prefers-reduced-motion: reduce) {
+                #ytc-menu .ytc-switch::after { transition: none; }
             }
 
             .ytc-dislike-count {
@@ -1297,18 +1859,42 @@
         return section;
     }
 
+    function createFlaskIcon() {
+        const svg = createSvgElement('svg', {
+            viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+            'stroke-width': '1.7', 'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+            'aria-hidden': 'true', focusable: 'false'
+        });
+        svg.appendChild(createSvgElement('path', {
+            d: 'M9 3h6M10 3v6l-5.2 9a2 2 0 0 0 1.7 3h11a2 2 0 0 0 1.7-3L14 9V3M8 15h8'
+        }));
+        return svg;
+    }
+
     function createSwitchRow(title, help, settingKey) {
         const row = createNode('div', 'ytc-row');
         const textWrap = document.createElement('div');
 
         const label = createNode('div', 'ytc-label', title);
         const helpText = createNode('div', 'ytc-help', help);
+        helpText.id = 'ytc-help-' + settingKey;
+        const experimental = EXPERIMENTAL_SETTINGS[settingKey];
+        if (experimental) {
+            const badge = createNode('span', 'ytc-experimental');
+            badge.id = 'ytc-experimental-' + settingKey;
+            badge.title = 'Experimental: ' + experimental;
+            badge.setAttribute('role', 'img');
+            badge.setAttribute('aria-label', badge.title);
+            badge.appendChild(createFlaskIcon());
+            label.appendChild(badge);
+        }
 
         const button = createNode('button', 'ytc-switch');
         button.type = 'button';
         button.dataset.setting = settingKey;
         button.setAttribute('role', 'switch');
         button.setAttribute('aria-label', title);
+        button.setAttribute('aria-describedby', helpText.id + (experimental ? ' ytc-experimental-' + settingKey : ''));
 
         button.addEventListener('click', (event) => {
             event.stopPropagation();
@@ -1325,6 +1911,21 @@
         return row;
     }
 
+    function createCollaborationSwitchRow() {
+        const row = createSwitchRow(
+            'Only subscribed uploaders',
+            'Hide collaborations from unfollowed uploaders; reads subscriptions on YouTube',
+            'hideUnsubscribedCollaborations'
+        );
+        const status = createNode('div', 'ytc-help', collaborationStatus);
+        status.id = 'ytc-collaboration-status';
+        status.hidden = !collaborationStatus;
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        row.firstElementChild.appendChild(status);
+        return row;
+    }
+
     function createWatchedModeSlider() {
         const wrap = createNode('div', 'ytc-slider-wrap');
         const head = createNode('div', 'ytc-slider-head');
@@ -1333,6 +1934,7 @@
         value.id = 'ytc-watched-mode-value';
 
         const help = createNode('div', 'ytc-help', 'Based on thumbnail watch progress; never applied to History');
+        help.id = 'ytc-watched-help';
         const slider = createNode('input', 'ytc-slider');
         slider.id = 'ytc-watched-mode-slider';
         slider.type = 'range';
@@ -1340,6 +1942,7 @@
         slider.max = '2';
         slider.step = '1';
         slider.setAttribute('aria-label', 'Watched videos');
+        slider.setAttribute('aria-describedby', help.id);
         slider.value = String(WATCHED_VIDEO_MODES.indexOf(settings.watchedVideosMode));
         slider.setAttribute('aria-valuetext', WATCHED_VIDEO_MODE_LABELS[Number(slider.value)]);
         value.textContent = WATCHED_VIDEO_MODE_LABELS[Number(slider.value)];
@@ -1387,6 +1990,8 @@
         slider.max = '8';
         slider.step = '1';
         slider.value = settings.columns;
+        slider.setAttribute('aria-label', 'Videos per row');
+        slider.setAttribute('aria-valuetext', settings.columns + ' videos per row');
 
         slider.addEventListener('input', (event) => {
             event.stopPropagation();
@@ -1480,34 +2085,50 @@
         menu.setAttribute('role', 'dialog');
         menu.setAttribute('aria-label', 'YouTube Cleaner settings');
 
+        const header = createNode('div', 'ytc-menu-header');
+        const brand = createNode('div', 'ytc-brand');
+        const logo = createNode('div', 'ytc-brand-icon');
+        logo.appendChild(createCleanerIcon());
+        const brandText = createNode('div');
         const title = createNode('div', 'ytc-title', 'YouTube Cleaner');
+        title.setAttribute('role', 'heading');
+        title.setAttribute('aria-level', '2');
+        brandText.appendChild(title);
+        const close = createNode('button', 'ytc-close');
+        close.type = 'button';
+        close.title = 'Close (Esc)';
+        close.setAttribute('aria-label', 'Close settings');
+        const closeIcon = createSvgElement('svg', {
+            viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+            'stroke-width': '1.8', 'stroke-linecap': 'round', 'aria-hidden': 'true'
+        });
+        closeIcon.appendChild(createSvgElement('path', { d: 'm6 6 12 12M6 18 18 6' }));
+        close.appendChild(closeIcon);
+        close.addEventListener('click', () => closeMenu(true));
+        brand.appendChild(logo);
+        brand.appendChild(brandText);
+        brand.appendChild(close);
+        header.appendChild(brand);
+        const master = createSwitchRow('Cleaner', settings.enabled ? 'Active' : 'Paused', 'enabled');
+        master.classList.add('ytc-master');
+        header.appendChild(master);
 
-        const generalSection = createSection(
-            'General',
-            createSwitchRow(
-                'Cleaner',
-                'Master switch for all cleanup features',
-                'enabled'
-            )
-        );
-
-        const shortsSection = createSection(
-            'Shorts',
+        const videoSection = createSection(
+            'Videos',
             createSwitchRow(
                 'Hide Shorts',
-                'Remove Shorts from feeds, navigation, and direct Shorts pages',
+                'Remove Shorts from feeds, sidebar, and direct links',
                 'hideShorts'
-            )
-        );
-
-        const browsingSection = createSection(
-            'Browsing',
+            ),
             createWatchedModeSlider(),
             createSwitchRow(
                 'Hide YouTube Mixes',
-                'Remove auto-generated Mix playlists from feeds and results',
+                'Keep regular playlists, remove auto-generated Mixes',
                 'hideMixes'
-            ),
+            )
+        );
+        const interfaceSection = createSection(
+            'Interface',
             createSwitchRow(
                 'Hide YouTube games',
                 'Remove Playables shelves and sidebar entries',
@@ -1515,12 +2136,12 @@
             ),
             createSwitchRow(
                 'Hide home shelves',
-                'Remove grouped recommendations, such as music selections',
+                'Remove grouped picks, including music selections',
                 'hideHomeShelves'
             ),
             createSwitchRow(
                 'Hide promotion labels',
-                'Remove clickable paid-promotion labels from thumbnail previews',
+                'Remove paid-promotion banners from thumbnail previews',
                 'hidePaidPromotion'
             )
         );
@@ -1536,11 +2157,12 @@
                 'Hide upcoming videos',
                 'Remove scheduled premieres and streams until they start',
                 'hideUpcomingVideos'
-            )
+            ),
+            createCollaborationSwitchRow()
         );
 
         const layoutSection = createSection(
-            'Layout',
+            'Grid',
             createColumnsAutoRow(),
             createColumnSlider()
         );
@@ -1554,13 +2176,48 @@
             )
         );
 
-        menu.appendChild(title);
-        menu.appendChild(generalSection);
-        menu.appendChild(shortsSection);
-        menu.appendChild(browsingSection);
-        menu.appendChild(subscriptionsSection);
-        menu.appendChild(layoutSection);
-        menu.appendChild(extrasSection);
+        const tabs = createNode('div', 'ytc-tabs');
+        tabs.setAttribute('role', 'tablist');
+        tabs.setAttribute('aria-label', 'Settings sections');
+        const body = createNode('div', 'ytc-menu-body');
+        const groups = [
+            { id: 'videos', title: 'Videos', sections: [videoSection, interfaceSection] },
+            { id: 'subscriptions', title: 'Subscriptions', sections: [subscriptionsSection] },
+            { id: 'layout', title: 'Layout', sections: [layoutSection, extrasSection] }
+        ];
+        groups.forEach((group, index) => {
+            const tab = createNode('button', 'ytc-tab', group.title);
+            tab.type = 'button';
+            tab.id = 'ytc-tab-' + group.id;
+            tab.dataset.tab = group.id;
+            tab.setAttribute('role', 'tab');
+            tab.setAttribute('aria-controls', 'ytc-panel-' + group.id);
+            tab.setAttribute('aria-selected', currentMenuTab === group.id ? 'true' : 'false');
+            tab.tabIndex = currentMenuTab === group.id ? 0 : -1;
+            tab.addEventListener('click', () => activateMenuTab(group.id));
+            tab.addEventListener('keydown', (event) => {
+                let next;
+                if (event.key === 'ArrowRight') next = (index + 1) % groups.length;
+                if (event.key === 'ArrowLeft') next = (index + groups.length - 1) % groups.length;
+                if (event.key === 'Home') next = 0;
+                if (event.key === 'End') next = groups.length - 1;
+                if (next === undefined) return;
+                event.preventDefault();
+                event.stopPropagation();
+                activateMenuTab(groups[next].id, true);
+            });
+            tabs.appendChild(tab);
+            const panel = createNode('div', 'ytc-panel');
+            panel.id = 'ytc-panel-' + group.id;
+            panel.setAttribute('role', 'tabpanel');
+            panel.setAttribute('aria-labelledby', tab.id);
+            panel.hidden = currentMenuTab !== group.id;
+            group.sections.forEach((section) => panel.appendChild(section));
+            body.appendChild(panel);
+        });
+        menu.appendChild(header);
+        menu.appendChild(tabs);
+        menu.appendChild(body);
 
         document.body.appendChild(menu);
 
@@ -1571,24 +2228,44 @@
             const clickedMenu = event.target.closest('#ytc-menu');
 
             if (!clickedButton && !clickedMenu) {
-                menu.hidden = true;
-                updateMenuExpandedState();
+                closeMenu();
             }
         });
 
         document.addEventListener('keydown', (event) => {
             if (event.key !== 'Escape' || menu.hidden) return;
 
-            menu.hidden = true;
-            updateMenuExpandedState();
-
-            const button = document.getElementById('ytc-button');
-            if (button) {
-                button.focus();
-            }
+            closeMenu(true);
         });
 
         updateMenuState();
+    }
+
+    function activateMenuTab(tabId, focus = false) {
+        const menu = document.getElementById('ytc-menu');
+        const tab = menu?.querySelector('#ytc-tab-' + tabId);
+        if (!tab) return;
+        const changed = currentMenuTab !== tabId;
+        currentMenuTab = tabId;
+        menu.querySelectorAll('.ytc-tab').forEach((button) => {
+            const selected = button === tab;
+            button.setAttribute('aria-selected', selected ? 'true' : 'false');
+            button.tabIndex = selected ? 0 : -1;
+        });
+        menu.querySelectorAll('.ytc-panel').forEach((panel) => {
+            panel.hidden = panel.id !== 'ytc-panel-' + tabId;
+        });
+        if (changed) menu.querySelector('.ytc-menu-body').scrollTop = 0;
+        if (focus) tab.focus({ preventScroll: true });
+        positionMenu();
+    }
+
+    function closeMenu(returnFocus = false) {
+        const menu = document.getElementById('ytc-menu');
+        if (!menu) return;
+        menu.hidden = true;
+        updateMenuExpandedState();
+        if (returnFocus) document.getElementById('ytc-button')?.focus({ preventScroll: true });
     }
 
     function positionMenu() {
@@ -1600,19 +2277,12 @@
         const rect = button.getBoundingClientRect();
         const margin = 12;
 
-        let top = Math.round(rect.bottom + 8);
+        let top = Math.max(margin, Math.round(rect.bottom + 10));
         let right = Math.round(window.innerWidth - rect.right);
-
-        if (right < margin) {
-            right = margin;
-        }
-
-        const menuHeight = menu.offsetHeight || 220;
-        const maxTop = window.innerHeight - menuHeight - margin;
-
-        if (top > maxTop) {
-            top = Math.max(margin, maxTop);
-        }
+        const menuWidth = menu.offsetWidth || 420;
+        right = Math.max(margin, Math.min(right, window.innerWidth - menuWidth - margin));
+        if (window.innerHeight - top - margin < 240) top = margin;
+        menu.style.maxHeight = Math.max(0, window.innerHeight - top - margin) + 'px';
 
         menu.style.top = `${top}px`;
         menu.style.right = `${right}px`;
@@ -1630,6 +2300,8 @@
         updateMenuExpandedState();
 
         if (!menu.hidden) {
+            activateMenuTab(currentMenuTab);
+            menu.querySelector('.ytc-tab[aria-selected="true"]')?.focus({ preventScroll: true });
             positionMenu();
             requestAnimationFrame(positionMenu);
         }
@@ -1654,6 +2326,9 @@
     function updateMenuState() {
         const menu = document.getElementById('ytc-menu');
         if (!menu) return;
+
+        const masterState = menu.querySelector('#ytc-help-enabled');
+        if (masterState) masterState.textContent = settings.enabled ? 'Active' : 'Paused';
 
         menu.querySelectorAll('.ytc-switch[data-setting]').forEach((button) => {
             const settingKey = button.dataset.setting;
@@ -1686,6 +2361,7 @@
         if (slider) {
             slider.value = settings.columns;
             slider.disabled = settings.automaticColumns;
+            slider.setAttribute('aria-valuetext', settings.columns + ' videos per row');
         }
 
         if (value) {
@@ -1717,6 +2393,9 @@
         ['yt-navigate-finish', 'yt-page-data-updated', 'popstate'].forEach((eventName) => {
             window.addEventListener(eventName, () => {
                 updateWatchedVideosState();
+                document.documentElement.dataset.ytcHideUnsubscribedCollaborations =
+                    collaborationFilterActive() ? 'true' : 'false';
+                if (eventName === 'yt-navigate-finish' || !collaborationFilterActive()) resetCollaborationFilter();
                 scheduleCleanup();
             });
         });

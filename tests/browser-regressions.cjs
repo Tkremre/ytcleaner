@@ -72,6 +72,29 @@ module.exports = async (page, userscript) => {
         await visible('#watched-modern', true);
         await navigate('/', 'home');
         await testPage.locator('#ytc-button').click();
+        assert(await testPage.getByRole('tab').count() === 3, 'Settings need three reachable sections');
+        await testPage.keyboard.press('ArrowRight');
+        assert(await testPage.getByRole('tab', { name: 'Subscriptions', exact: true }).getAttribute('aria-selected') === 'true', 'Arrow keys must switch sections');
+        assert(await testPage.locator('#ytc-watched-mode-slider').isVisible() === false, 'Inactive sections must be hidden');
+        await testPage.keyboard.press('End');
+        assert(await testPage.locator('#ytc-column-slider').isVisible(), 'End must reach Layout');
+        await testPage.keyboard.press('Home');
+        const experimental = await testPage.locator('.ytc-row:has(.ytc-experimental) button[data-setting]').evaluateAll(
+            (buttons) => buttons.map((button) => button.dataset.setting).sort()
+        );
+        assert(JSON.stringify(experimental) === JSON.stringify(['hideHomeShelves', 'hideUnsubscribedCollaborations', 'hideUpcomingVideos'].sort()), 'Experimental markers must identify the fragile options');
+        assert(await testPage.locator('[data-setting="hideUnsubscribedCollaborations"]').getAttribute('aria-describedby').then(value => value.includes('ytc-experimental-hideUnsubscribedCollaborations')), 'Experimental options need an accessible explanation');
+        for (const dark of [false, true]) {
+            await testPage.evaluate((dark) => document.documentElement.toggleAttribute('dark', dark), dark);
+            const activeColor = await testPage.locator('[data-setting="enabled"]').evaluate((button) => getComputedStyle(button).backgroundColor);
+            await toggle('enabled');
+            assert(await testPage.locator('#ytc-help-enabled').textContent() === 'Paused', 'Master switch must explain when cleanup is paused');
+            const inactiveColor = await testPage.locator('[data-setting="enabled"]').evaluate((button) => getComputedStyle(button).backgroundColor);
+            assert(activeColor !== inactiveColor, 'On/off states must stay visually distinct in both themes');
+            await toggle('enabled');
+            assert(await testPage.locator('#ytc-help-enabled').textContent() === 'Active', 'Master switch must explain when cleanup is active');
+        }
+        await testPage.evaluate(() => document.documentElement.removeAttribute('dark'));
         await testPage.locator('#ytc-watched-mode-slider').evaluate((slider) => {
             slider.value = '0';
             slider.dispatchEvent(new Event('input', { bubbles: true }));
@@ -99,6 +122,20 @@ module.exports = async (page, userscript) => {
         await testPage.locator('#preview-video').click({ position: { x: 20, y: 15 } });
         assert(await testPage.locator('#preview-video').getAttribute('data-clicks') === '1', 'Click must reach the video preview');
         await testPage.locator('#ytc-button').click();
+        await testPage.getByRole('tab', { name: 'Layout', exact: true }).click();
+        await testPage.setViewportSize({ width: 390, height: 520 });
+        const bounds = await testPage.locator('#ytc-menu').evaluate((menu) => {
+            const rect = menu.getBoundingClientRect();
+            return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: innerWidth, height: innerHeight };
+        });
+        assert(bounds.left >= 0 && bounds.right <= bounds.width && bounds.top >= 0 && bounds.bottom <= bounds.height, 'Settings must fit a small viewport');
+        await testPage.getByRole('button', { name: 'Close settings', exact: true }).click();
+        assert(await testPage.locator('#ytc-menu').isVisible() === false, 'Close button must dismiss settings');
+        assert(await testPage.locator('#ytc-button').evaluate((button) => button === document.activeElement), 'Closing settings must restore focus');
+        await testPage.locator('#ytc-button').click();
+        assert(await testPage.getByRole('tab', { name: 'Layout', exact: true }).getAttribute('aria-selected') === 'true', 'Reopening must keep the chosen section');
+        await testPage.getByRole('tab', { name: 'Videos', exact: true }).click();
+        await testPage.setViewportSize({ width: 1280, height: 800 });
         await testPage.locator('#ytc-watched-mode-slider').evaluate((slider) => {
             slider.value = '2';
             slider.dispatchEvent(new Event('input', { bubbles: true }));
@@ -116,7 +153,7 @@ module.exports = async (page, userscript) => {
         await toggle('enabled');
         for (const selector of ['#watched-legacy', '#watched-modern', '#games', '#games-modern', '#games-nav', '#music', '#thematic', '#preview-label', '#legacy-label']) await visible(selector, true);
         assert(failures.length === 0, failures.join('\n'));
-        return { passed: true, checks: ['History and SPA navigation', 'independent optional filters', 'normal videos and channel/search shelves', 'preview clicks and controls', 'settings persistence', 'master switch'], pageErrors: failures };
+        return { passed: true, checks: ['History and SPA navigation', 'independent optional filters', 'normal videos and channel/search shelves', 'preview clicks and controls', 'settings persistence', 'master switch', 'keyboard tabs and close/focus behavior', 'experimental feature explanations', 'small viewport and light/dark controls'], pageErrors: failures };
     } finally {
         await testPage.close();
     }

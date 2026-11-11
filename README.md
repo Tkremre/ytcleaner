@@ -43,6 +43,7 @@ If you miss the 2015-2016 style YouTube desktop experience, this script tries to
 - Redirect `/shorts/` pages back to the YouTube homepage
 - Remove "Most relevant", recommendations, and similar noisy blocks from the Subscriptions page
 - Optionally hide scheduled premieres and live streams from Subscriptions until they start
+- Optionally hide collaboration videos from Subscriptions when their uploading channel is not subscribed
 - Choose whether to leave, dim, or hide videos with a watch-progress indicator
 - Optionally hide auto-generated YouTube Mix playlists without hiding regular playlists
 - Optionally hide YouTube Playables game shelves and sidebar entries
@@ -107,15 +108,12 @@ You should see a small cleaner icon in the YouTube top bar, near the Create and 
 
 ## Usage
 
-Click the YouTube Cleaner button in the YouTube top bar to open the settings menu.
+Click the YouTube Cleaner button in the YouTube top bar to open the settings panel. The Cleaner switch stays at the top, and three tabs group the controls. Changes are saved automatically. Close the panel with the close button, Escape, or a click outside it; use the arrow keys to move between tabs.
 
 Available settings:
 
-- **General**
-  - Enable or disable YouTube Cleaner globally
-- **Shorts**
+- **Videos**
   - Hide or keep Shorts across feeds, navigation, and direct Shorts pages
-- **Browsing**
   - Choose Off, Dim, or Hide for videos with a watch-progress indicator
   - Hide auto-generated YouTube Mix playlists from feeds, search results, and recommendations
   - Hide YouTube games (Playables shelves and sidebar entries)
@@ -124,19 +122,21 @@ Available settings:
 - **Subscriptions**
   - Enable or disable noisy subscription section hiding
   - Hide upcoming premieres and scheduled live streams until they start
+  - Only subscribed uploaders: hide collaborations published by channels you do not follow, while keeping collaborations uploaded by subscribed channels
 - **Layout**
   - Use YouTube automatic columns
   - Choose 1 to 8 thumbnails per row with the slider
-- **Extras**
   - Enable or disable dislike counts on watch pages
 
 Your settings are saved locally in your browser.
+
+A small amber flask marks **experimental** options: home shelves, upcoming videos, and subscribed-uploaders filtering. Hover over the flask for the reason. These features depend on YouTube layouts or internal metadata that can vary between accounts and change over time.
 
 Watched-video detection uses the progress indicator shown on YouTube thumbnails. Videos without that indicator remain visible, even if they appear in your watch history. The watched-video filter is automatically disabled on History, while your saved Off / Dim / Hide preference still applies on other pages.
 
 The games, home shelves, and promotion-label filters are disabled by default. Home shelf filtering only affects grouped video recommendations on the homepage; channel pages and search results are unaffected. Shorts and Playables remain controlled by their own settings. Promotion-label filtering affects thumbnail previews and leaves the disclosure in the main video player visible.
 
-No account, server, or custom backend is used by YouTube Cleaner.
+No separate account or custom backend is required by YouTube Cleaner. The optional subscription filter uses your existing YouTube session.
 
 ---
 
@@ -162,6 +162,12 @@ If YouTube changes its grid again, try enabling Automatic grid first.
 ## Privacy Notes
 
 Most features run entirely in your browser and only change the local YouTube interface.
+
+The optional **Only subscribed uploaders** filter is disabled by default and only runs on Subscriptions. It reads your complete subscription list from YouTube, including continuation pages, and requests only the video ID and uploading channel ID for collaboration videos. A complete watch page is fetched only as a fallback when the lightweight metadata is unavailable. It does not guess from display names or require every collaborator to be subscribed. These requests go directly to YouTube using your existing session; fetched pages are parsed as data without executing their scripts or starting playback.
+
+At most two video metadata requests run at once. Subscription and uploader results stay in memory for up to five minutes and are cleared when the filter is disabled or you leave Subscriptions. Toggle the filter off and on, or refresh the page, to update it immediately after changing subscriptions. Missing metadata, incomplete subscription lists, and request failures leave videos visible. No subscription list is stored in local storage or sent to another service.
+
+The status below **Only subscribed uploaders** shows whether channels or uploaders are being checked, how many collaboration videos were hidden, and whether verification failed. For example, when you follow Le Routin but not Le Routin TCG, only collaborations uploaded by Le Routin stay visible. Following Savun does not keep a collaboration uploaded by the separate Vayke Savun channel.
 
 The **Show dislikes** option calls the public [Return YouTube Dislike](https://returnyoutubedislike.com/) API for the current video ID. Keep it disabled if you do not want the script to make that external request.
 
@@ -281,6 +287,17 @@ YouTube-Cleaner.user.js
 
 ## Changelog
 
+### 1.4.0
+
+- Redesigned settings with three tabs, a persistent master switch, clear close controls, and light/dark themes
+- Marked experimental options with a discreet flask icon and an accessible explanation
+- Added an optional **Only subscribed uploaders** filter to Subscriptions, keeping collaborations when the actual uploading channel is subscribed
+- Matched channel IDs against the complete subscription list instead of comparing displayed names or hiding every collaboration
+- Kept uploader checks lightweight with minimal metadata requests, in-memory caching, and a watch-page fallback
+- Loaded complete subscription lists while distinguishing pagination from YouTube's sort commands
+- Kept unverified videos visible and added readable filter status and diagnostic codes
+- Added regression coverage for uploader matching, metadata failures, and accessible settings controls
+
 ### 1.3.0
 
 - Excluded History from watched-video dimming and hiding, including navigation without a page reload
@@ -357,6 +374,8 @@ Suggestions, bug reports, and improvements are welcome.
 Run the dependency-free userscript checks with `node --test` before submitting changes.
 
 For browser checks, `tests/browser-regressions.cjs` exports an async function accepting a Playwright `page` and the userscript source. It runs on an isolated fixture page and checks History navigation, filter independence, preview clicks, and saved settings.
+
+`tests/collaborations.browser.cjs` uses the same interface and checks uploader matching, paginated subscriptions, incomplete data, request cancellation, and filtering only on Subscriptions.
 
 You can contribute by opening an issue or creating a pull request.
 
