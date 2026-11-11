@@ -167,7 +167,7 @@ The optional **Only subscribed uploaders** filter is disabled by default and onl
 
 At most two video metadata requests run at once. Subscription and uploader results stay in memory for up to five minutes and are cleared when the filter is disabled or you leave Subscriptions. Toggle the filter off and on, or refresh the page, to update it immediately after changing subscriptions. Missing metadata, incomplete subscription lists, and request failures leave videos visible. No subscription list is stored in local storage or sent to another service.
 
-The status below **Only subscribed uploaders** shows whether channels or uploaders are being checked, how many collaboration videos were hidden, and whether verification failed. For example, when you follow Le Routin but not Le Routin TCG, only collaborations uploaded by Le Routin stay visible. Following Savun does not keep a collaboration uploaded by the separate Vayke Savun channel.
+The status below **Only subscribed uploaders** shows whether channels or uploaders are being checked, how many collaboration videos were hidden, and whether verification failed. The filter checks the channel that uploaded the video; following another collaborator does not keep the video in the feed.
 
 The **Show dislikes** option calls the public [Return YouTube Dislike](https://returnyoutubedislike.com/) API for the current video ID. Keep it disabled if you do not want the script to make that external request.
 
