@@ -287,6 +287,11 @@ YouTube-Cleaner.user.js
 
 ## Changelog
 
+### 1.4.1
+
+- Added French script name and description metadata so Greasy Fork accepts the French presentation
+- Added French presentation and release text, plus combined 1.4.0 / 1.4.1 changelogs for Greasy Fork
+
 ### 1.4.0
 
 - Redesigned settings with three tabs, a persistent master switch, clear close controls, and light/dark themes

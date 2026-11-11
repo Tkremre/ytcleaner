@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         YouTube Cleaner - Hide Shorts & Clean Layout
+// @name:fr      YouTube Cleaner - Masquer les Shorts et nettoyer l'interface
 // @namespace    https://github.com/Tkremre/ytcleaner
-// @version      1.4.0
+// @version      1.4.1
 // @description  Hide Shorts, watched videos, and Mixes; clean subscriptions, customize the grid, and optionally show dislikes.
+// @description:fr Masquez les Shorts, les vidéos vues et les Mix, nettoyez les abonnements, personnalisez la grille et affichez les dislikes en option.
 // @author       Tkremre
 // @license      MIT
 // @homepageURL  https://github.com/Tkremre/ytcleaner
