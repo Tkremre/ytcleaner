@@ -2,11 +2,9 @@
 
 <h1><img src="./assets/youtube-cleaner.svg" alt="" width="36" height="36" align="top">&nbsp;YouTube Cleaner</h1>
 
-### Bring back a cleaner old-school YouTube desktop layout.
+### You came for the videos.
 
-No Shorts.<br>
-No noisy subscription sections.<br>
-More control over the desktop grid.
+A few useful settings for the page around them.
 
 [![YouTube](https://img.shields.io/badge/YouTube-Cleaner-red?style=for-the-badge&logo=youtube)](https://www.youtube.com/)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-Userscript-00485B?style=for-the-badge)](https://www.tampermonkey.net/)
@@ -21,40 +19,39 @@ More control over the desktop grid.
 
 ## Introduction
 
-YouTube Cleaner is a lightweight userscript made for people who prefer the older YouTube desktop browsing experience.
+YouTube Cleaner adds a small settings menu to YouTube on desktop. Hide the sections you keep scrolling past, adjust the grid, or keep the video on screen while you read the comments.
 
-It focuses on the interface around the player, not the player itself.
+You can use it just to remove Shorts. You can also keep recommendations, leave the player alone, and use YouTube's automatic grid. There is no need to turn everything on.
 
-The goal is simple:
-
-- remove Shorts from the interface
-- remove noisy sections from Subscriptions
-- restore a denser desktop grid when you want it
-- keep YouTube clean, simple, and easier to browse
-
-If you miss the 2015-2016 style YouTube desktop experience, this script tries to bring a bit of that feeling back.
+The site stays familiar. Cleaner gives you a few more choices about what surrounds your videos, with settings saved in your browser.
 
 ---
 
 ## Features
 
-- Hide YouTube Shorts from the homepage, subscriptions, sidebar, and other common sections
-- Hide the Shorts button from the left sidebar
-- Redirect `/shorts/` pages back to the YouTube homepage
-- Remove "Most relevant", recommendations, and similar noisy blocks from the Subscriptions page
-- Optionally hide scheduled premieres and live streams from Subscriptions until they start
-- Optionally hide collaboration videos from Subscriptions when their uploading channel is not subscribed
-- Choose whether to leave, dim, or hide videos with a watch-progress indicator
-- Optionally hide auto-generated YouTube Mix playlists without hiding regular playlists
-- Optionally hide YouTube Playables game shelves and sidebar entries
-- Optionally hide grouped homepage recommendations, including music selections
-- Optionally hide clickable paid-promotion labels on thumbnail previews
-- Switch between automatic YouTube columns and a manual grid
-- Use a slider from 1 to 8 video thumbnails per row
-- Show dislike counts on watch pages with Return YouTube Dislike
-- Add a cleaner-style settings button in the YouTube top bar
-- Split settings into clear menu sections
-- Save your settings locally in your browser
+### Clear the feed
+
+- Hide Shorts across feeds and navigation, and redirect `/shorts/` pages to Home
+- Remove extra blocks from Subscriptions, or recognized recommendation sections from Home and search
+- Leave watched videos alone, dim them, or hide them; History stays untouched
+- Hide Mixes, Playables, or membership-badged videos
+- Filter video titles with your own words or phrases and choose the pages affected
+- Hide upcoming videos from Subscriptions, or collaborations uploaded by channels you do not follow
+
+### Arrange the page
+
+- Keep YouTube's automatic grid or choose 1 to 8 videos per row
+- Hide clickable paid-promotion labels on previews and in the floating player
+- Open all settings from the broom button in the top bar; your choices are saved locally
+
+### Keep watching
+
+- Keep the original player in view while reading comments, with a movable, resizable floating view that remembers its position
+- Scroll the right-hand recommendations without moving the video or comments, in the normal two-column watch layout
+- Hide end cards covering the final seconds without losing subtitles or playback controls
+- Optionally add Return YouTube Dislike counts to YouTube's own dislike button
+
+Most extras are off by default. Some filters depend on YouTube layouts or metadata that can change; a small flask in the settings marks these experimental options. [Usage](#usage) explains what each one does and where it applies.
 
 ---
 
@@ -62,7 +59,7 @@ If you miss the 2015-2016 style YouTube desktop experience, this script tries to
 
 1. [Installation](#installation)
 2. [Usage](#usage)
-3. [Recommended Settings](#recommended-settings)
+3. [Where to Start](#where-to-start)
 4. [Privacy Notes](#privacy-notes)
 5. [Common Issues](#common-issues)
 6. [Update URL](#update-url)
@@ -108,60 +105,78 @@ You should see a small cleaner icon in the YouTube top bar, near the Create and 
 
 ## Usage
 
-Click the YouTube Cleaner button in the YouTube top bar to open the settings panel. The Cleaner switch stays at the top, and three tabs group the controls. Changes are saved automatically. Close the panel with the close button, Escape, or a click outside it; use the arrow keys to move between tabs.
+Click the YouTube Cleaner button in the YouTube top bar to open the settings panel. The Cleaner switch stays at the top, and four tabs group the controls. Changes are saved automatically. Close the panel with the close button, Escape, or a click outside it; use the arrow keys to move between tabs. The menu remembers the last tab while YouTube stays open, and each tab keeps its own scroll position.
 
 Available settings:
 
-- **Videos**
+- **Browse**
   - Hide or keep Shorts across feeds, navigation, and direct Shorts pages
   - Choose Off, Dim, or Hide for videos with a watch-progress indicator
-  - Hide auto-generated YouTube Mix playlists from feeds, search results, and recommendations
+  - Use YouTube automatic columns or choose 1 to 8 thumbnails per row
   - Hide YouTube games (Playables shelves and sidebar entries)
   - Hide grouped home shelves, such as music selections
-  - Hide paid-promotion labels on thumbnail previews
+  - Clean recognized recommendation sections from search results
 - **Subscriptions**
   - Enable or disable noisy subscription section hiding
   - Hide upcoming premieres and scheduled live streams until they start
   - Only subscribed uploaders: hide collaborations published by channels you do not follow, while keeping collaborations uploaded by subscribed channels
-- **Layout**
-  - Use YouTube automatic columns
-  - Choose 1 to 8 thumbnails per row with the slider
+- **Filters**
+  - Hide auto-generated YouTube Mix playlists without hiding regular playlists
+  - Hide all membership-badged videos, even if you have access to them
+  - Filter video titles with a personal word list and page choices
+- **Player**
+  - Enable the floating player while scrolling through a watch page
+  - Scroll recommendations independently in the normal two-column watch layout
+  - Hide end cards without hiding playback controls or subtitles
+  - Hide paid-promotion labels on thumbnail previews and the floating player
   - Enable or disable dislike counts on watch pages
 
 Your settings are saved locally in your browser.
 
-A small amber flask marks **experimental** options: home shelves, upcoming videos, and subscribed-uploaders filtering. Hover over the flask for the reason. These features depend on YouTube layouts or internal metadata that can vary between accounts and change over time.
+A small amber flask marks **experimental** options: home shelves, upcoming videos, subscribed-uploaders filtering, the floating player, independent recommendations, search-section cleanup, and members-only filtering. Hover over the flask for the reason. These features depend on YouTube layouts or internal metadata that can vary between accounts and change over time.
+
+**Clean search results** only hides recognized recommendation headings in English and French, such as “People also watched”, “For you”, and “Explorer davantage”. Regular video, channel, and playlist results stay intact; unknown sections are left visible. **Hide end cards** removes the cards over the final seconds and their Hide button, not subtitles, playback controls, or the promotion disclosure.
+
+**Hide members-only videos** uses YouTube's membership badges, not title words or your subscription list. It hides all recognized members-only cards, including videos you could access through a paid membership. Unmarked videos remain visible. History is always excluded, and nothing changes your actual memberships or access rights.
+
+**Filter video titles** is under **Filters → Title filters**. Expand **Edit words and pages** and enter one word or phrase per line. Matching uses literal title fragments, ignoring case and accents; punctuation is literal, not regular-expression syntax. Descriptions, channel names, comments, playlists, and channel cards are not matched. Choose Home, Subscriptions, Search, Related videos, and/or Channel pages. Only Home and Subscriptions are selected initially; History is always excluded. Empty lists hide nothing. The list and page choices are saved locally, even while the filter or master switch is off.
+
+**Floating player** is disabled by default and available under **Player → While watching**. Once the playing video's original position has scrolled above the header, it initially floats at the bottom-right of the main column, just left of the recommendations. If no separate right-hand column is available, it uses the window's bottom-right corner. Scrolling back restores it. Hover to reveal YouTube-style circular controls: use the move handle to drag the player, drag any corner to resize without changing its aspect ratio, or use the reset button to return to the default size and placement. A saved personal layout takes priority over the default. The return and dismiss buttons do not pause playback; after dismissal, scrolling back to the original player allows it to float again. Actions also stay visible when focused from the keyboard, but moving and resizing are mouse-only. Escape cancels an ongoing drag.
+
+The chosen size and relative position are saved locally on release and reused for subsequent videos and page loads. A smaller window temporarily clamps the player inside the viewport without overwriting your preferred layout. Corners stay rounded in both default and theater layouts. Resize corners use a subtle hover cue instead of permanent icons. Hover explanations use YouTube-style player tooltips, not browser title popups.
+
+This uses the original YouTube player, not a second video or an operating-system PiP window, and makes no additional requests. The frame adapts to the browser viewport and preserves portrait and ultrawide videos without cropping. Default and theater layouts are supported. It stays out of fullscreen, native PiP, and YouTube's own miniplayer, and is suspended in windows narrower than 640 CSS pixels or shorter than 400 CSS pixels. Unknown player layouts are left untouched.
+
+**Independent recommendations**, also under **Player → While watching**, is off by default. In the normal two-column watch layout, recommendations get a vertical-only scroll area that stays accessible beside the main column. Scrolling inside the list does not move the video or comments, even at the list's ends; move the pointer to the main column to scroll the page. No horizontal scrollbar is added. YouTube can still load more recommendations normally. The option leaves theater/fullscreen, stacked narrow layouts, and sidebars occupied by a playlist, live chat, or another panel unchanged. Disabling it or leaving the watch page restores the original sidebar. This feature changes only the layout and does not request data itself.
 
 Watched-video detection uses the progress indicator shown on YouTube thumbnails. Videos without that indicator remain visible, even if they appear in your watch history. The watched-video filter is automatically disabled on History, while your saved Off / Dim / Hide preference still applies on other pages.
 
-The games, home shelves, and promotion-label filters are disabled by default. Home shelf filtering only affects grouped video recommendations on the homepage; channel pages and search results are unaffected. Shorts and Playables remain controlled by their own settings. Promotion-label filtering affects thumbnail previews and leaves the disclosure in the main video player visible.
+The games, home shelves, and promotion-label filters are disabled by default. Home shelf filtering only affects grouped video recommendations on the homepage; channel pages and search results are unaffected. Shorts and Playables remain controlled by their own settings. Promotion-label filtering affects thumbnail previews and the floating player, and leaves the disclosure in the full-size video player visible.
 
 No separate account or custom backend is required by YouTube Cleaner. The optional subscription filter uses your existing YouTube session.
 
 ---
 
-## Recommended Settings
+## Where to Start
 
-For a desktop experience closer to older YouTube layouts:
+Start with the part of YouTube that bothers you:
 
-- Cleaner: enabled
-- Hide Shorts: enabled
-- Watched videos: Dim (or Hide if you prefer not to see them at all)
-- Hide YouTube Mixes: optional
-- Hide noisy subscription sections: enabled
-- Hide upcoming videos: optional
-- Automatic grid: disabled
-- Manual columns: 5
+- If you keep scrolling past Shorts or extra Subscription sections, start with those filters.
+- If the homepage feels too spread out, try a manual grid. Five columns is a starting point; YouTube's automatic layout is still available.
+- If you lose sight of the video when opening the comments, try the floating player. Its size and position are yours to adjust.
+- If you want to browse suggestions without moving the page, try independent recommendations in the normal two-column view.
 
-For large monitors, 6 to 8 columns can also work well.
+Change one thing at a time and keep what helps. The title filters and other extras can wait until you need them.
 
-If YouTube changes its grid again, try enabling Automatic grid first.
+You can pause Cleaner with the main switch without losing your settings.
 
 ---
 
 ## Privacy Notes
 
 Most features run entirely in your browser and only change the local YouTube interface.
+
+Search cleanup, end-card hiding, members-only hiding, and title filters use the page already loaded by YouTube. They make no additional requests. Your blocked words stay in your browser and are not sent to YouTube or another service.
 
 The optional **Only subscribed uploaders** filter is disabled by default and only runs on Subscriptions. It reads your complete subscription list from YouTube, including continuation pages, and requests only the video ID and uploading channel ID for collaboration videos. A complete watch page is fetched only as a fallback when the lightweight metadata is unavailable. It does not guess from display names or require every collaborator to be subscribed. These requests go directly to YouTube using your existing session; fetched pages are parsed as data without executing their scripts or starting playback.
 
@@ -286,6 +301,21 @@ YouTube-Cleaner.user.js
 ---
 
 ## Changelog
+
+### 1.5.0
+
+- Regrouped settings into Browse, Subscriptions, Filters, and Player, keeping common controls on the first tab and remembering each tab's scroll position
+- Updated the presentation around feed cleanup, layout choices, and playback tools, keeping the YouTube Cleaner name and broom logo
+- Added optional independent vertical scrolling for recommendations in the normal two-column watch layout, without scroll chaining or a horizontal scrollbar
+- Added optional search-section cleanup for recognized English and French recommendation headings, preserving regular results
+- Added optional end-card hiding while keeping playback controls and subtitles
+- Added optional membership-badge filtering, with History excluded and no membership lookup
+- Added literal title-word filtering with a local multiline editor and per-page choices, excluding Search by default and History always
+- Added an optional floating player with mouse dragging, aspect-preserving resizing, local size/position memory, and return, dismiss, and reset controls
+- Placed the floating player left of recommendations by default, with responsive sizing and rounded corners in both normal and theater layouts
+- Matched hover controls and tooltips to YouTube's player, while keeping the original video and playback controls
+- Extended promotion-label hiding to the floating view, leaving the full-size player's disclosure visible
+- Kept saved settings and custom player layouts, and left new options off by default
 
 ### 1.4.1
 

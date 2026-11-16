@@ -2,9 +2,9 @@
 // @name         YouTube Cleaner - Hide Shorts & Clean Layout
 // @name:fr      YouTube Cleaner - Masquer les Shorts et nettoyer l'interface
 // @namespace    https://github.com/Tkremre/ytcleaner
-// @version      1.4.1
-// @description  Hide Shorts, watched videos, and Mixes; clean subscriptions, customize the grid, and optionally show dislikes.
-// @description:fr Masquez les Shorts, les vidéos vues et les Mix, nettoyez les abonnements, personnalisez la grille et affichez les dislikes en option.
+// @version      1.5.0
+// @description  Hide the parts you skip, adjust the layout, and keep the video in view. A few useful settings for YouTube on desktop.
+// @description:fr Retirez ce qui vous encombre, réglez l’affichage et gardez la vidéo sous les yeux. Quelques réglages utiles pour YouTube sur ordinateur.
 // @author       Tkremre
 // @license      MIT
 // @homepageURL  https://github.com/Tkremre/ytcleaner
@@ -24,6 +24,7 @@
     'use strict';
 
     const STORAGE_KEY = 'yt_cleaner_settings_v1';
+    const FLOATING_LAYOUT_KEY = 'yt_cleaner_floating_layout_v1';
     const DISLIKE_API_URL = 'https://returnyoutubedislikeapi.com/votes?videoId=';
 
     const DEFAULTS = {
@@ -36,9 +37,17 @@
         hidePlayables: false,
         hideHomeShelves: false,
         hidePaidPromotion: false,
+        hideSearchSections: false,
+        hideEndCards: false,
+        hideMembersOnly: false,
+        filterVideoTitles: false,
+        blockedTitleKeywords: '',
+        keywordFilterPages: ['home', 'subscriptions'],
         hideSubscriptionSections: true,
         hideUpcomingVideos: false,
         hideUnsubscribedCollaborations: false,
+        floatingPlayer: false,
+        scrollRecommendations: false,
         showDislikes: false
     };
 
@@ -48,8 +57,29 @@
     const EXPERIMENTAL_SETTINGS = {
         hideHomeShelves: 'Grouped recommendations vary between YouTube layouts.',
         hideUpcomingVideos: 'Upcoming-video indicators can vary between YouTube layouts.',
-        hideUnsubscribedCollaborations: 'Uses YouTube subscription and uploader metadata that can change.'
+        hideUnsubscribedCollaborations: 'Uses YouTube subscription and uploader metadata that can change.',
+        floatingPlayer: 'Uses the desktop watch-page player layout, which YouTube can change.',
+        scrollRecommendations: 'Uses the desktop two-column sidebar. Theater, narrow windows, and sidebars with other panels stay unchanged.',
+        hideSearchSections: 'Recognizes recommendation headings in English and French; unknown sections stay visible.',
+        hideMembersOnly: 'Relies on YouTube membership badges; unmarked videos stay visible.'
     };
+    const VIDEO_CARD_SELECTOR = 'ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model';
+    const KEYWORD_PAGE_LABELS = {
+        home: 'Home', subscriptions: 'Subscriptions', search: 'Search',
+        related: 'Related videos', channels: 'Channel pages'
+    };
+    const SEARCH_NOISE_TITLES = new Set([
+        'People also watched', 'For you', 'Previously watched', 'Explore more',
+        'Related to your search', 'From related searches', 'People also search for', 'Channels new to you',
+        "D’autres personnes ont également regardé", "D’autres personnes ont aussi regardé",
+        "D’autres personnes ont regardé", 'Les internautes ont également regardé',
+        'Les internautes ont aussi regardé', 'Les internautes regardent aussi', 'Pour vous',
+        'Déjà regardées', 'Vidéos déjà regardées', 'Déjà visionnées', 'Explorer davantage',
+        'Explorer plus', 'Recherches associées', 'Les internautes recherchent aussi',
+        'En rapport avec votre recherche'
+    ].map(normalizeText));
+    const HIDDEN_SEARCH_CLASS = 'ytc-hidden-search-section';
+    const HIDDEN_KEYWORD_CLASS = 'ytc-hidden-title';
     const HIDDEN_SHORTS_CLASS = 'ytc-hidden-shorts';
     const HIDDEN_SUBSCRIPTIONS_CLASS = 'ytc-hidden-subscriptions';
     const HIDDEN_COLLABORATIONS_CLASS = 'ytc-hidden-collaboration';
@@ -85,8 +115,17 @@
     let collaborationRequest = null;
     let collaborationRetryAt = 0;
     let collaborationStatus = '';
-    let currentMenuTab = 'videos';
+    let currentMenuTab = 'browse';
+    const menuTabScrollPositions = new Map();
     const collaborationUploaders = new Map();
+    let floatingPlayer = null;
+    let floatingFrameQueued = false;
+    let floatingNavigation = false;
+    let floatingLayout = loadFloatingLayout();
+    let recommendationsPane = null;
+    let recommendationsFrameQueued = false;
+    let titleKeywordSource = null;
+    let titleKeywords = [];
 
     function loadSettings() {
         try {
@@ -145,6 +184,17 @@
             loaded.showDislikes = typeof loaded.showDislikes === 'boolean'
                 ? loaded.showDislikes
                 : DEFAULTS.showDislikes;
+            loaded.floatingPlayer = typeof loaded.floatingPlayer === 'boolean'
+                ? loaded.floatingPlayer
+                : DEFAULTS.floatingPlayer;
+            ['hideSearchSections', 'hideEndCards', 'hideMembersOnly', 'filterVideoTitles', 'scrollRecommendations'].forEach((key) => {
+                loaded[key] = typeof loaded[key] === 'boolean' ? loaded[key] : DEFAULTS[key];
+            });
+            loaded.blockedTitleKeywords = typeof loaded.blockedTitleKeywords === 'string'
+                ? loaded.blockedTitleKeywords.slice(0, 10000) : '';
+            loaded.keywordFilterPages = Array.isArray(loaded.keywordFilterPages)
+                ? [...new Set(loaded.keywordFilterPages.filter((page) => typeof page === 'string' && Object.hasOwn(KEYWORD_PAGE_LABELS, page)))]
+                : [...DEFAULTS.keywordFilterPages];
 
             delete loaded.shortsMode;
             delete loaded.redirectShorts;
@@ -1110,6 +1160,490 @@
         }
     }
 
+    function parseTitleKeywords(value) {
+        return [...new Set(String(value).split(/\r?\n/).map(normalizeText).filter(Boolean))];
+    }
+
+    function keywordFilterRoot() {
+        const pages = settings.keywordFilterPages;
+        let selector = '';
+        if (location.pathname === '/' && pages.includes('home')) {
+            selector = 'ytd-browse[page-subtype="home"]:not([hidden])';
+        } else if (isSubscriptionsPage() && pages.includes('subscriptions')) {
+            selector = 'ytd-browse[page-subtype="subscriptions"]:not([hidden])';
+        } else if (location.pathname === '/results' && pages.includes('search')) {
+            selector = 'ytd-search:not([hidden])';
+        } else if (isWatchPage() && pages.includes('related')) {
+            selector = 'ytd-watch-flexy:not([hidden]) #related';
+        } else if (/^\/(?:@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)(?:\/|$)/.test(location.pathname) && pages.includes('channels')) {
+            selector = 'ytd-browse[page-subtype="channels"]:not([hidden])';
+        }
+        return selector ? document.querySelector(selector) : null;
+    }
+
+    function filterVideoTitles() {
+        if (!settings.enabled || !settings.filterVideoTitles) {
+            unhideElements(HIDDEN_KEYWORD_CLASS);
+            return;
+        }
+        if (titleKeywordSource !== settings.blockedTitleKeywords) {
+            titleKeywordSource = settings.blockedTitleKeywords;
+            titleKeywords = parseTitleKeywords(titleKeywordSource);
+        }
+        const root = titleKeywords.length ? keywordFilterRoot() : null;
+        const hidden = new Set();
+        if (root) {
+            queryAll(VIDEO_CARD_SELECTOR, root).forEach((card) => {
+                // Hide the outer card, not an inner lockup that would leave an empty grid slot.
+                if (card.parentElement?.closest(VIDEO_CARD_SELECTOR)) return;
+                const title = card.querySelector('#video-title, .ytLockupMetadataViewModelTitle, .yt-lockup-metadata-view-model__title, h3 a[href^="/watch"], h3 a[href^="/shorts/"]');
+                const link = title?.closest('a[href]') || title?.querySelector('a[href]');
+                if (!link) return;
+                let url;
+                try {
+                    url = new URL(link.getAttribute('href'), location.href);
+                } catch {
+                    return;
+                }
+                // Modern lockups also represent playlists and channels, not just videos.
+                if (url.origin !== location.origin || !(url.pathname === '/watch' || url.pathname.startsWith('/shorts/'))) return;
+                const text = normalizeText(title?.getAttribute('title') || title?.textContent);
+                if (text && titleKeywords.some((keyword) => text.includes(keyword))) hidden.add(card);
+            });
+        }
+        Array.from(document.getElementsByClassName(HIDDEN_KEYWORD_CLASS)).forEach((card) => {
+            if (!hidden.has(card)) card.classList.remove(HIDDEN_KEYWORD_CLASS);
+        });
+        hidden.forEach((card) => card.classList.add(HIDDEN_KEYWORD_CLASS));
+    }
+
+    function hideSearchSections() {
+        const hidden = new Set();
+        if (settings.enabled && settings.hideSearchSections && location.pathname === '/results') {
+            queryAll('ytd-search:not([hidden]) :is(ytd-shelf-renderer, ytd-rich-section-renderer, grid-shelf-view-model, ytd-horizontal-card-list-renderer)').forEach((shelf) => {
+                // Match section headings only: a video title must never hide unrelated search results.
+                const heading = shelf.querySelector('#title-text, #header #title, #title-container #title, yt-section-header-view-model h2, .ytSectionHeaderViewModelTitle');
+                if (heading && SEARCH_NOISE_TITLES.has(normalizeText(heading.textContent))) hidden.add(shelf);
+            });
+        }
+        Array.from(document.getElementsByClassName(HIDDEN_SEARCH_CLASS)).forEach((shelf) => {
+            if (!hidden.has(shelf)) shelf.classList.remove(HIDDEN_SEARCH_CLASS);
+        });
+        hidden.forEach((shelf) => shelf.classList.add(HIDDEN_SEARCH_CLASS));
+    }
+
+    function clearRecommendationsStyles(pane) {
+        pane.panel.classList.remove('ytc-scrollable-recommendations');
+        pane.inner.classList.remove('ytc-recommendations-inner');
+        pane.secondary.classList.remove('ytc-recommendations-column');
+        pane.inner.style.removeProperty('--ytc-recommendations-top');
+        pane.panel.style.removeProperty('--ytc-recommendations-height');
+    }
+
+    function resetRecommendationsPane() {
+        if (!recommendationsPane) return;
+        clearRecommendationsStyles(recommendationsPane);
+        recommendationsPane.observer.disconnect();
+        recommendationsPane.resizeObserver?.disconnect();
+        recommendationsPane = null;
+    }
+
+    function scheduleRecommendationsPane() {
+        if (recommendationsFrameQueued || (!recommendationsPane &&
+            (!settings.enabled || !settings.scrollRecommendations || !isWatchPage()))) return;
+        recommendationsFrameQueued = true;
+        requestAnimationFrame(() => {
+            recommendationsFrameQueued = false;
+            runCleanupTask('Independent recommendations', syncRecommendationsPane);
+        });
+    }
+
+    function syncRecommendationsPane() {
+        if (!settings.enabled || !settings.scrollRecommendations || !isWatchPage() || floatingNavigation) {
+            resetRecommendationsPane();
+            return;
+        }
+        const watch = document.querySelector('ytd-watch-flexy:not([hidden])');
+        const primary = watch?.querySelector('#primary');
+        const secondary = watch?.querySelector('#secondary');
+        const inner = secondary?.querySelector('#secondary-inner');
+        const panel = inner?.querySelector(':scope > #related');
+        if (!primary || !panel) {
+            resetRecommendationsPane();
+            return;
+        }
+        if (recommendationsPane && (recommendationsPane.panel !== panel || recommendationsPane.inner !== inner ||
+            recommendationsPane.secondary !== secondary || recommendationsPane.watch !== watch)) resetRecommendationsPane();
+        if (!recommendationsPane) {
+            const observer = new MutationObserver(scheduleRecommendationsPane);
+            observer.observe(watch, { attributes: true, attributeFilter: ['theater', 'full-bleed-player', 'fullscreen', 'hidden', 'is-two-columns_'] });
+            observer.observe(inner, { attributes: true, childList: true, subtree: true, attributeFilter: ['hidden', 'collapsed'] });
+            recommendationsPane = { watch, secondary, inner, panel, observer };
+            if (typeof ResizeObserver !== 'undefined') {
+                recommendationsPane.resizeObserver = new ResizeObserver(scheduleRecommendationsPane);
+                recommendationsPane.resizeObserver.observe(secondary);
+                recommendationsPane.resizeObserver.observe(inner);
+            }
+        }
+        const primaryRect = primary.getBoundingClientRect();
+        const secondaryRect = secondary.getBoundingClientRect();
+        const hasOtherPanels = Array.from(inner.children).some((child) => child !== panel && child.getBoundingClientRect().height > 1);
+        const headerBottom = document.querySelector('ytd-masthead')?.getBoundingClientRect().bottom || 56;
+        const top = Math.max(12, Math.min(120, headerBottom) + 12);
+        const panelTop = Math.max(top, panel.getBoundingClientRect().top);
+        const height = Math.floor(floatingViewport().height - panelTop - 16);
+        if (document.fullscreenElement || watch.hasAttribute('fullscreen') || watch.hasAttribute('theater') ||
+            watch.hasAttribute('full-bleed-player') || hasOtherPanels || height < 200 ||
+            !primaryRect.width || secondaryRect.width < 200 || secondaryRect.left < primaryRect.right - 1) {
+            clearRecommendationsStyles(recommendationsPane);
+            return;
+        }
+        inner.style.setProperty('--ytc-recommendations-top', top + 'px');
+        panel.style.setProperty('--ytc-recommendations-height', height + 'px');
+        secondary.classList.add('ytc-recommendations-column');
+        inner.classList.add('ytc-recommendations-inner');
+        panel.classList.add('ytc-scrollable-recommendations');
+    }
+
+    function parseFloatingLayout(value) {
+        if (!value || typeof value !== 'object' ||
+            !Number.isFinite(value.width) || value.width < 160 || value.width > 16384 ||
+            !Number.isFinite(value.x) || value.x < 0 || value.x > 1 ||
+            !Number.isFinite(value.y) || value.y < 0 || value.y > 1) return null;
+        return { width: value.width, x: value.x, y: value.y };
+    }
+
+    function loadFloatingLayout() {
+        try {
+            return parseFloatingLayout(JSON.parse(localStorage.getItem(FLOATING_LAYOUT_KEY) || 'null'));
+        } catch {
+            return null;
+        }
+    }
+
+    function saveFloatingLayout() {
+        try {
+            if (floatingLayout) localStorage.setItem(FLOATING_LAYOUT_KEY, JSON.stringify(floatingLayout));
+            else localStorage.removeItem(FLOATING_LAYOUT_KEY);
+        } catch {
+            // Keep the chosen layout for this session if browser storage is unavailable.
+        }
+    }
+
+    function floatingGeometry(layout, viewportWidth, viewportHeight, headerBottom, defaultRight = viewportWidth - 16) {
+        const topLimit = Math.max(16, headerBottom + 8);
+        const maxWidth = Math.max(1, Math.floor(Math.min(viewportWidth - 32, (viewportHeight - topLimit - 16) * 16 / 9)));
+        const defaultWidth = Math.min(420, Math.max(280, viewportWidth * 0.3), (viewportHeight - headerBottom - 48) * 0.5 * 16 / 9);
+        const width = Math.max(Math.min(280, maxWidth), Math.min(maxWidth, Math.round(layout?.width || defaultWidth)));
+        const height = width * 9 / 16;
+        return {
+            width, height, topLimit, maxWidth,
+            left: layout
+                ? 16 + Math.max(0, viewportWidth - 32 - width) * layout.x
+                : Math.max(16, Math.min(viewportWidth - 16 - width, defaultRight - width)),
+            top: topLimit + Math.max(0, viewportHeight - topLimit - 16 - height) * (layout?.y ?? 1)
+        };
+    }
+
+    function floatingViewport() {
+        return {
+            width: document.documentElement.clientWidth || window.innerWidth,
+            height: document.documentElement.clientHeight || window.innerHeight
+        };
+    }
+
+    function rememberFloatingRect(rect, topLimit) {
+        const clamp = (value) => Math.max(0, Math.min(1, value));
+        const viewport = floatingViewport();
+        floatingLayout = {
+            width: rect.width,
+            x: clamp((rect.left - 16) / Math.max(1, viewport.width - 32 - rect.width)),
+            y: clamp((rect.top - topLimit) / Math.max(1, viewport.height - topLimit - 16 - rect.width * 9 / 16))
+        };
+        scheduleFloatingPlayer();
+    }
+
+    function stopFloatingGesture(state, save) {
+        const gesture = state?.gesture;
+        if (!gesture) return;
+        state.gesture = null;
+        state.host.classList.remove('ytc-floating-interacting');
+        if (gesture.handle.hasPointerCapture(gesture.id)) gesture.handle.releasePointerCapture(gesture.id);
+        if (save && gesture.changed) saveFloatingLayout();
+        else floatingLayout = gesture.previousLayout;
+        scheduleFloatingPlayer();
+    }
+
+    function bindFloatingHandle(handle, state, corner = '') {
+        handle.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); });
+        handle.addEventListener('pointerdown', (event) => {
+            if (event.button !== 0 || !state.floating || state.gesture) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const viewport = floatingViewport();
+            state.gesture = {
+                id: event.pointerId, handle, corner, startX: event.clientX, startY: event.clientY,
+                rect: state.host.getBoundingClientRect(), previousLayout: floatingLayout,
+                viewportWidth: viewport.width, viewportHeight: viewport.height, changed: false
+            };
+            handle.setPointerCapture(event.pointerId);
+            state.host.classList.add('ytc-floating-interacting');
+        });
+        handle.addEventListener('pointermove', (event) => {
+            const gesture = state.gesture;
+            if (!gesture || gesture.id !== event.pointerId) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const dx = event.clientX - gesture.startX;
+            const dy = event.clientY - gesture.startY;
+            if (!dx && !dy && !gesture.changed) return;
+            gesture.changed = true;
+            const rect = { left: gesture.rect.left + dx, top: gesture.rect.top + dy, width: gesture.rect.width };
+            if (corner) {
+                const viewport = floatingViewport();
+                const fromLeft = corner.includes('left');
+                const fromTop = corner.includes('top');
+                const horizontal = dx * (fromLeft ? -1 : 1);
+                const vertical = dy * (fromTop ? -1 : 1) * 16 / 9;
+                const delta = Math.abs(horizontal) >= Math.abs(vertical) ? horizontal : vertical;
+                const maxWidth = Math.min(
+                    fromLeft ? gesture.rect.right - 16 : viewport.width - 16 - gesture.rect.left,
+                    (fromTop ? gesture.rect.bottom - state.geometry.topLimit : viewport.height - 16 - gesture.rect.top) * 16 / 9
+                );
+                rect.width = Math.max(Math.min(280, maxWidth), Math.min(maxWidth, gesture.rect.width + delta));
+                rect.left = fromLeft ? gesture.rect.right - rect.width : gesture.rect.left;
+                rect.top = fromTop ? gesture.rect.bottom - rect.width * 9 / 16 : gesture.rect.top;
+            }
+            rememberFloatingRect(rect, state.geometry.topLimit);
+        });
+        handle.addEventListener('pointerup', (event) => {
+            if (state.gesture?.id !== event.pointerId) return;
+            event.preventDefault();
+            event.stopPropagation();
+            stopFloatingGesture(state, true);
+        });
+        ['pointercancel', 'lostpointercapture'].forEach((name) => {
+            handle.addEventListener(name, () => stopFloatingGesture(state, false));
+        });
+    }
+
+    function restoreFloatingPlayer() {
+        if (!floatingPlayer?.floating) return;
+        stopFloatingGesture(floatingPlayer, false);
+        floatingPlayer.hideTooltip();
+        floatingPlayer.floating = false;
+        floatingPlayer.host.classList.remove('ytc-floating-player');
+        ['width', 'left', 'top'].forEach((key) => floatingPlayer.host.style.removeProperty('--ytc-floating-' + key));
+        floatingPlayer.controls.remove();
+        // Let YouTube recalculate its own controls after the size change.
+        window.dispatchEvent(new Event('resize'));
+    }
+
+    function resetFloatingPlayer() {
+        if (!floatingPlayer) return;
+        restoreFloatingPlayer();
+        floatingPlayer.events.forEach((name) => {
+            floatingPlayer.video.removeEventListener(name, scheduleFloatingPlayer);
+        });
+        floatingPlayer.resizeObserver?.disconnect();
+        floatingPlayer.observer.disconnect();
+        floatingPlayer = null;
+    }
+
+    function createFloatingControls(state) {
+        const controls = createNode('div', 'ytc-floating-controls');
+        const toolbar = createNode('div', 'ytc-floating-toolbar');
+        const tooltip = createNode('div', 'ytc-floating-tooltip');
+        tooltip.id = 'ytc-floating-tooltip';
+        tooltip.setAttribute('role', 'tooltip');
+        tooltip.hidden = true;
+        let tooltipTimer;
+        let tooltipButton;
+        state.hideTooltip = () => {
+            window.clearTimeout(tooltipTimer);
+            tooltip.hidden = true;
+            tooltipButton?.removeAttribute('aria-describedby');
+            tooltipButton = null;
+        };
+        const attachTooltip = (button, text) => {
+            const show = () => {
+                if (!state.floating || state.gesture) return;
+                state.hideTooltip();
+                tooltipButton = button;
+                tooltip.textContent = text;
+                tooltip.hidden = false;
+                button.setAttribute('aria-describedby', tooltip.id);
+                const player = state.host.getBoundingClientRect();
+                const target = button.getBoundingClientRect();
+                const box = tooltip.getBoundingClientRect();
+                const left = target.left - player.left + (target.width - box.width) / 2;
+                let top = target.bottom - player.top + 8;
+                if (top + box.height > player.height - 8) top = target.top - player.top - box.height - 8;
+                tooltip.style.left = Math.max(8, Math.min(player.width - box.width - 8, left)) + 'px';
+                tooltip.style.top = Math.max(8, top) + 'px';
+            };
+            button.addEventListener('pointerenter', () => {
+                state.hideTooltip();
+                tooltipTimer = window.setTimeout(show, 300);
+            });
+            button.addEventListener('focus', show);
+            ['pointerleave', 'blur', 'pointerdown'].forEach((name) => button.addEventListener(name, state.hideTooltip));
+        };
+        const move = createNode('button', 'ytc-floating-drag');
+        move.type = 'button';
+        move.tabIndex = -1;
+        move.setAttribute('aria-label', 'Move floating player');
+        attachTooltip(move, 'Drag to move');
+        const grip = createSvgElement('svg', {
+            viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2',
+            'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true'
+        });
+        grip.appendChild(createSvgElement('path', { d: 'M12 3v18M3 12h18m-12-6 3-3 3 3m-6 12 3 3 3-3M6 9l-3 3 3 3m12-6 3 3-3 3' }));
+        move.appendChild(grip);
+        bindFloatingHandle(move, state);
+        toolbar.appendChild(move);
+        const actionGroup = createNode('div', 'ytc-floating-actions');
+        const actions = [
+            ['Reset floating size and position', 'M3 10a9 9 0 1 1 2 8M3 4v6h6', () => {
+                stopFloatingGesture(state, false);
+                floatingLayout = null;
+                saveFloatingLayout();
+                scheduleFloatingPlayer();
+            }],
+            ['Back to video', 'm7 14 5-5 5 5M12 9v10M5 5h14', () => {
+                state.dismissed = true;
+                restoreFloatingPlayer();
+                window.scrollBy({ top: state.anchor.getBoundingClientRect().top - 72, behavior: 'smooth' });
+            }],
+            ['Dismiss floating player', 'm6 6 12 12M6 18 18 6', () => {
+                state.dismissed = true;
+                restoreFloatingPlayer();
+            }]
+        ];
+        actions.forEach(([label, path, action]) => {
+            const button = createNode('button');
+            button.type = 'button';
+            button.setAttribute('aria-label', label);
+            attachTooltip(button, label === 'Reset floating size and position' ? 'Reset size and position' : label === 'Dismiss floating player' ? 'Hide floating player' : label);
+            const icon = createSvgElement('svg', {
+                viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+                'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true'
+            });
+            icon.appendChild(createSvgElement('path', { d: path }));
+            button.appendChild(icon);
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                action();
+            });
+            actionGroup.appendChild(button);
+        });
+        toolbar.appendChild(actionGroup);
+        controls.appendChild(toolbar);
+        ['top-left', 'top-right', 'bottom-left', 'bottom-right'].forEach((corner) => {
+            const handle = createNode('button', 'ytc-floating-resize');
+            handle.type = 'button';
+            handle.tabIndex = -1;
+            handle.dataset.corner = corner;
+            const label = 'Resize floating player from ' + corner.replace('-', ' ');
+            handle.setAttribute('aria-label', label);
+            attachTooltip(handle, 'Drag to resize');
+            bindFloatingHandle(handle, state, corner);
+            controls.appendChild(handle);
+        });
+        controls.appendChild(tooltip);
+        return controls;
+    }
+
+    function scheduleFloatingPlayer() {
+        if (floatingFrameQueued || (!floatingPlayer && (!settings.enabled || !settings.floatingPlayer))) return;
+        floatingFrameQueued = true;
+        requestAnimationFrame(() => {
+            floatingFrameQueued = false;
+            runCleanupTask('Floating player', syncFloatingPlayer);
+        });
+    }
+
+    function syncFloatingPlayer() {
+        if (!settings.enabled || !settings.floatingPlayer || !isWatchPage() || floatingNavigation) {
+            resetFloatingPlayer();
+            return;
+        }
+
+        const watch = document.querySelector('ytd-watch-flexy:not([hidden])');
+        const host = watch?.querySelector('#player-container');
+        const video = host?.querySelector('#movie_player video.html5-main-video');
+        const anchor = host?.parentElement;
+        // These wrappers reserve the original player space even when its absolute child is fixed.
+        // Unknown layouts stay untouched rather than risking broken playback or a page jump.
+        if (!video || !['player-container-inner', 'player-full-bleed-container'].includes(anchor?.id)) {
+            resetFloatingPlayer();
+            return;
+        }
+
+        const videoId = getCurrentVideoId();
+        if (floatingPlayer && (floatingPlayer.host !== host || floatingPlayer.video !== video ||
+            floatingPlayer.anchor !== anchor || floatingPlayer.videoId !== videoId)) {
+            resetFloatingPlayer();
+        }
+        if (!floatingPlayer) {
+            const state = {
+                host, anchor, video, videoId, floating: false, dismissed: false,
+                events: ['playing', 'pause', 'ended', 'emptied', 'loadedmetadata',
+                    'enterpictureinpicture', 'leavepictureinpicture']
+            };
+            state.controls = createFloatingControls(state);
+            state.events.forEach((name) => video.addEventListener(name, scheduleFloatingPlayer));
+            state.observer = new MutationObserver(scheduleFloatingPlayer);
+            state.observer.observe(watch, { attributes: true, attributeFilter: ['theater', 'fullscreen', 'hidden', 'video-id'] });
+            state.observer.observe(host.querySelector('#movie_player'), { attributes: true, attributeFilter: ['class'] });
+            if (typeof ResizeObserver !== 'undefined') {
+                state.resizeObserver = new ResizeObserver(scheduleFloatingPlayer);
+                state.resizeObserver.observe(anchor);
+            }
+            floatingPlayer = state;
+        }
+
+        const state = floatingPlayer;
+        const rect = anchor.getBoundingClientRect();
+        const headerBottom = document.querySelector('ytd-masthead')?.getBoundingClientRect().bottom || 56;
+        const threshold = Math.max(0, Math.min(120, headerBottom));
+        const viewport = floatingViewport();
+        if (rect.bottom > threshold + 32) state.dismissed = false;
+
+        const unavailable = document.fullscreenElement || document.pictureInPictureElement ||
+            watch.hasAttribute('fullscreen') || host.querySelector('.ytp-player-minimized') ||
+            viewport.width < 640 || viewport.height < 400 ||
+            !rect.width || !rect.height || video.ended || video.readyState < 2;
+        if (unavailable || state.dismissed || rect.bottom > threshold + (state.floating ? 32 : 0)) {
+            restoreFloatingPlayer();
+            return;
+        }
+        // A paused video should not pop out, but keep the controls available if paused while floating.
+        if (!state.floating && video.paused) return;
+
+        if (state.gesture && (state.gesture.viewportWidth !== viewport.width || state.gesture.viewportHeight !== viewport.height)) {
+            stopFloatingGesture(state, false);
+        }
+        const mainRect = (watch.querySelector('#primary-inner') || watch.querySelector('#primary'))?.getBoundingClientRect();
+        const sideRect = watch.querySelector('#secondary')?.getBoundingClientRect();
+        const defaultRight = mainRect?.width && sideRect?.width >= 200 && sideRect.left >= mainRect.right - 1
+            ? mainRect.right : undefined;
+        const geometry = floatingGeometry(floatingLayout, viewport.width, viewport.height, threshold, defaultRight);
+        const resized = state.geometry && state.geometry.width !== geometry.width;
+        state.geometry = geometry;
+        ['width', 'left', 'top'].forEach((key) => {
+            const value = geometry[key] + 'px';
+            if (host.style.getPropertyValue('--ytc-floating-' + key) !== value) host.style.setProperty('--ytc-floating-' + key, value);
+        });
+        if (!state.floating) {
+            state.floating = true;
+            host.classList.add('ytc-floating-player');
+            host.appendChild(state.controls);
+            window.dispatchEvent(new Event('resize'));
+        } else if (resized) window.dispatchEvent(new Event('resize'));
+    }
+
     function runCleanupTask(label, task) {
         try {
             task();
@@ -1124,6 +1658,10 @@
 
     function cleanPage() {
         updateWatchedVideosState();
+        runCleanupTask('Floating player', syncFloatingPlayer);
+        runCleanupTask('Independent recommendations', syncRecommendationsPane);
+        runCleanupTask('Search sections', hideSearchSections);
+        runCleanupTask('Title filters', filterVideoTitles);
         runCleanupTask('Collaboration filter', hideUnsubscribedCollaborations);
         runCleanupTask('Shorts redirect', redirectShortsPage);
 
@@ -1167,11 +1705,18 @@
     }
 
     function mutationNeedsCleanup(mutations) {
-        const ownedSelector = '#ytc-menu, #ytc-button-wrap, #ytc-dislikes';
+        const ownedSelector = '#ytc-menu, #ytc-button-wrap, #ytc-dislikes, .ytc-floating-controls';
 
         return mutations.some((mutation) => {
+            if (mutation.type === 'characterData') {
+                return settings.enabled && (settings.filterVideoTitles || settings.hideSearchSections) &&
+                    Boolean(mutation.target.parentElement?.closest('ytd-search, ' + VIDEO_CARD_SELECTOR)) &&
+                    !mutation.target.parentElement.closest(ownedSelector);
+            }
             if (mutation.type === 'attributes') {
-                return settings.enabled && (settings.hideShorts ||
+                const titleChanged = settings.filterVideoTitles && mutation.attributeName === 'title';
+                return settings.enabled && ((settings.hideShorts && mutation.attributeName !== 'title') ||
+                    titleChanged ||
                     (collaborationFilterActive() && mutation.attributeName === 'href')) &&
                     mutation.target instanceof Element &&
                     !mutation.target.closest(ownedSelector);
@@ -1220,6 +1765,8 @@
         root.dataset.ytcHidePlayables = settings.enabled && settings.hidePlayables ? 'true' : 'false';
         root.dataset.ytcHideHomeShelves = settings.enabled && settings.hideHomeShelves ? 'true' : 'false';
         root.dataset.ytcHidePaidPromotion = settings.enabled && settings.hidePaidPromotion ? 'true' : 'false';
+        root.dataset.ytcHideEndCards = settings.enabled && settings.hideEndCards ? 'true' : 'false';
+        root.dataset.ytcHideMembersOnly = settings.enabled && settings.hideMembersOnly ? 'true' : 'false';
         root.dataset.ytcHideUpcoming =
             settings.enabled && settings.hideUpcomingVideos ? 'true' : 'false';
         root.dataset.ytcHideUnsubscribedCollaborations =
@@ -1231,6 +1778,10 @@
         updateMenuState();
 
         if (!collaborationFilterActive()) resetCollaborationFilter();
+        if (!settings.enabled || !settings.floatingPlayer) resetFloatingPlayer();
+        if (!settings.enabled || !settings.scrollRecommendations) resetRecommendationsPane();
+        if (!settings.enabled || !settings.filterVideoTitles) unhideElements(HIDDEN_KEYWORD_CLASS);
+        if (!settings.enabled || !settings.hideSearchSections) unhideElements(HIDDEN_SEARCH_CLASS);
 
         if (!settings.enabled || !settings.hideShorts) {
             unhideElements(HIDDEN_SHORTS_CLASS);
@@ -1249,8 +1800,188 @@
 
     function addStyles() {
         const css = `
+            .ytc-recommendations-column { align-self: stretch !important; }
+            .ytc-recommendations-inner {
+                position: sticky !important;
+                top: var(--ytc-recommendations-top) !important;
+            }
+            .ytc-scrollable-recommendations {
+                max-height: var(--ytc-recommendations-height) !important;
+                overflow-y: auto !important;
+                overflow-x: hidden !important;
+                min-width: 0;
+                max-width: 100%;
+                overscroll-behavior-y: contain;
+                scrollbar-width: thin;
+                scrollbar-gutter: stable;
+            }
+            .ytc-scrollable-recommendations > ytd-watch-next-secondary-results-renderer { max-width: 100%; }
+
+            #player-container.ytc-floating-player {
+                position: fixed !important;
+                inset: var(--ytc-floating-top) auto auto var(--ytc-floating-left) !important;
+                width: var(--ytc-floating-width) !important;
+                height: calc(var(--ytc-floating-width) * 9 / 16) !important;
+                min-width: 0 !important;
+                min-height: 0 !important;
+                max-width: none !important;
+                max-height: none !important;
+                margin: 0 !important;
+                z-index: 2018 !important;
+                border-radius: 12px !important;
+                overflow: hidden !important;
+                isolation: isolate;
+                background: #000;
+                box-shadow: 0 8px 32px #0007, 0 0 0 1px #ffffff26;
+            }
+
+            ytd-watch-flexy:has(.ytc-floating-player) #full-bleed-container {
+                overflow: visible !important;
+                z-index: 2018 !important;
+            }
+
+            .ytc-floating-player #movie_player,
+            .ytc-floating-player .html5-video-container {
+                width: 100% !important;
+                height: 100% !important;
+            }
+
+            .ytc-floating-player #movie_player { border-radius: 12px !important; }
+            .ytc-floating-interacting { user-select: none; }
+
+            .ytc-floating-player video.html5-main-video {
+                width: 100% !important;
+                height: 100% !important;
+                left: 0 !important;
+                top: 0 !important;
+                object-fit: contain !important;
+            }
+
+            .ytc-floating-player .ytp-chrome-bottom {
+                left: 8px !important;
+                right: 8px !important;
+                width: auto !important;
+                min-width: 0 !important;
+            }
+
+            .ytc-floating-player .ytp-size-button,
+            .ytc-floating-player .ytp-miniplayer-button {
+                display: none !important;
+            }
+
+            .ytc-floating-controls {
+                position: absolute;
+                inset: 0;
+                pointer-events: none;
+                z-index: 1000;
+            }
+
+            .ytc-floating-toolbar {
+                position: absolute;
+                top: 10px;
+                left: 10px;
+                right: 10px;
+                display: flex;
+                justify-content: space-between;
+                opacity: 0;
+                transition: opacity .12s ease;
+            }
+
+            .ytc-floating-player:hover .ytc-floating-toolbar,
+            .ytc-floating-controls:has(:focus-visible) .ytc-floating-toolbar,
+            .ytc-floating-interacting .ytc-floating-toolbar { opacity: 1; }
+
+            .ytc-floating-actions,
+            .ytc-floating-controls .ytc-floating-drag {
+                border-radius: 999px;
+            }
+            .ytc-floating-actions { display: flex; gap: 4px; }
+
+            .ytc-floating-controls button {
+                display: grid;
+                place-items: center;
+                width: 40px;
+                height: 40px;
+                padding: 8px;
+                border: 0;
+                border-radius: 50%;
+                background: rgba(0, 0, 0, .3);
+                color: #fff;
+                cursor: pointer;
+                pointer-events: none;
+            }
+
+            .ytc-floating-player:hover .ytc-floating-toolbar button,
+            .ytc-floating-controls:has(:focus-visible) .ytc-floating-toolbar button,
+            .ytc-floating-interacting .ytc-floating-toolbar button { pointer-events: auto; }
+            .ytc-floating-controls .ytc-floating-drag { cursor: grab; touch-action: none; }
+            .ytc-floating-interacting .ytc-floating-drag { cursor: grabbing; }
+            .ytc-floating-controls .ytc-floating-resize {
+                position: absolute;
+                width: 20px;
+                height: 20px;
+                padding: 0;
+                border: 0;
+                border-radius: 0;
+                background: transparent;
+                touch-action: none;
+                pointer-events: auto;
+            }
+            .ytc-floating-resize::after {
+                content: '';
+                position: absolute;
+                right: 4px;
+                bottom: 4px;
+                width: 7px;
+                height: 7px;
+                border-right: 1.5px solid #fff;
+                border-bottom: 1.5px solid #fff;
+                border-bottom-right-radius: 2px;
+                filter: drop-shadow(0 1px 2px #000);
+                opacity: 0;
+            }
+            .ytc-floating-resize[data-corner="top-left"] { top: 0; left: 0; cursor: nwse-resize; transform: rotate(180deg); }
+            .ytc-floating-resize[data-corner="top-right"] { top: 0; right: 0; cursor: nesw-resize; transform: rotate(-90deg); }
+            .ytc-floating-resize[data-corner="bottom-left"] { bottom: 0; left: 0; cursor: nesw-resize; transform: rotate(90deg); }
+            .ytc-floating-resize[data-corner="bottom-right"] { bottom: 0; right: 0; cursor: nwse-resize; }
+            .ytc-floating-controls .ytc-floating-resize:hover,
+            .ytc-floating-controls .ytc-floating-resize:focus-visible { background: transparent; }
+            .ytc-floating-resize:hover::after,
+            .ytc-floating-resize:focus-visible::after { opacity: .9; }
+
+            .ytc-floating-controls button:hover { background-color: rgba(0, 0, 0, .5); }
+            .ytc-floating-controls button:focus-visible { outline: 2px solid #fff; outline-offset: -2px; }
+            .ytc-floating-controls svg { width: 24px; height: 24px; pointer-events: none; }
+            .ytc-floating-tooltip {
+                position: absolute;
+                z-index: 1;
+                box-sizing: border-box;
+                max-width: calc(100% - 16px);
+                padding: 5px 9px;
+                border-radius: 8px;
+                background: rgba(0, 0, 0, .3);
+                color: #eee;
+                font: 500 13px/15px "YouTube Noto", Roboto, Arial, Helvetica, sans-serif;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                pointer-events: none;
+            }
+            .ytc-floating-tooltip[hidden] { display: none !important; }
+            @media (prefers-reduced-motion: reduce) { .ytc-floating-toolbar { transition: none; } }
+
             .ytc-hidden-shorts,
-            .ytc-hidden-subscriptions {
+            .ytc-hidden-subscriptions,
+            .ytc-hidden-search-section,
+            .ytc-hidden-title {
+                display: none !important;
+            }
+
+            html[data-ytc-hide-end-cards="true"] #movie_player :is(.ytp-ce-element, .ytp-ce-hide-button-container) {
+                display: none !important;
+            }
+
+            html[data-ytc-hide-members-only="true"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model):not(ytd-browse[page-subtype="history"] *):has(:is(.badge-style-type-members-only, .yt-badge-shape--membership, .ytBadgeShapeMembership)) {
                 display: none !important;
             }
 
@@ -1302,8 +2033,8 @@
                 display: none !important;
             }
 
-            /* Target the promotion label, keeping other preview controls and the main player intact. */
-            html[data-ytc-hide-paid-promotion="true"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model, ytd-thumbnail, yt-thumbnail-view-model, ytd-video-preview, #inline-player, .ytp-inline-preview-mode) :is(.ytp-paid-content-overlay, .ytmPaidContentOverlayHost, .YtmPaidContentOverlayHost, ytm-paid-content-overlay-renderer, a[href^="https://support.google.com/youtube"][href*="p=ppp"]) {
+            /* Hide the label in previews and the floating view, not the full-size player. */
+            html[data-ytc-hide-paid-promotion="true"] :is(ytd-rich-item-renderer, ytd-video-renderer, ytd-grid-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model, ytd-thumbnail, yt-thumbnail-view-model, ytd-video-preview, #inline-player, .ytp-inline-preview-mode, .ytc-floating-player) :is(.ytp-paid-content-overlay, .ytmPaidContentOverlayHost, .YtmPaidContentOverlayHost, ytm-paid-content-overlay-renderer, a[href^="https://support.google.com/youtube"][href*="p=ppp"]) {
                 display: none !important;
             }
 
@@ -1376,7 +2107,9 @@
 
             #ytc-button:focus-visible,
             #ytc-menu button:focus-visible,
-            #ytc-menu input:focus-visible {
+            #ytc-menu input:focus-visible,
+            #ytc-menu textarea:focus-visible,
+            #ytc-menu summary:focus-visible {
                 outline: 2px solid #3ea6ff;
                 outline-offset: 2px;
             }
@@ -1536,7 +2269,7 @@
             #ytc-menu .ytc-tabs {
                 display: flex;
                 flex: 0 0 auto;
-                gap: 22px;
+                gap: clamp(8px, 2vw, 18px);
                 padding: 0 20px;
                 border-bottom: 1px solid var(--ytc-line);
             }
@@ -1550,6 +2283,7 @@
                 font: inherit;
                 font-weight: 500;
                 cursor: pointer;
+                white-space: nowrap;
             }
 
             #ytc-menu .ytc-tab:hover,
@@ -1622,6 +2356,29 @@
                 margin-top: 3px;
                 color: var(--ytc-muted);
             }
+
+            #ytc-menu .ytc-keyword-editor { margin: 0 0 12px; }
+            #ytc-menu .ytc-keyword-editor summary { cursor: pointer; color: var(--ytc-muted); padding: 4px 0; }
+            #ytc-menu .ytc-keyword-editor textarea {
+                box-sizing: border-box;
+                display: block;
+                width: 100%;
+                min-height: 110px;
+                margin: 8px 0;
+                padding: 10px;
+                resize: vertical;
+                border: 1px solid var(--ytc-line);
+                border-radius: 6px;
+                background: var(--ytc-hover);
+                color: var(--ytc-text);
+                font: inherit;
+                line-height: 1.5;
+            }
+            #ytc-menu .ytc-keyword-pages { border: 0; padding: 8px 0 0; margin: 0; min-width: 0; }
+            #ytc-menu .ytc-keyword-pages legend { color: var(--ytc-muted); font-size: 12px; }
+            #ytc-menu .ytc-keyword-page-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+            #ytc-menu .ytc-keyword-page-list label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+            #ytc-menu .ytc-keyword-page-list input { margin: 0; accent-color: var(--ytc-accent); }
 
             #ytc-menu #ytc-collaboration-status {
                 border-left: 2px solid var(--ytc-line);
@@ -1928,6 +2685,52 @@
         return row;
     }
 
+    function createKeywordEditor() {
+        const details = createNode('details', 'ytc-keyword-editor');
+        details.appendChild(createNode('summary', null, 'Edit words and pages'));
+        const label = createNode('label', 'ytc-help', 'One word or phrase per line. Matches title fragments, ignoring case and accents. No regular expressions.');
+        label.htmlFor = 'ytc-title-keywords';
+        label.id = 'ytc-title-keywords-help';
+        const textarea = createNode('textarea');
+        textarea.id = 'ytc-title-keywords';
+        textarea.rows = 5;
+        textarea.maxLength = 10000;
+        textarea.spellcheck = false;
+        textarea.value = settings.blockedTitleKeywords;
+        textarea.setAttribute('aria-label', 'Blocked title words and phrases');
+        textarea.setAttribute('aria-describedby', label.id);
+        textarea.addEventListener('input', () => {
+            settings.blockedTitleKeywords = textarea.value.slice(0, 10000);
+            saveSettings();
+        });
+        // Keep typing shortcuts inside the editor, not in YouTube's player.
+        textarea.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape') event.stopPropagation();
+        });
+        details.appendChild(label);
+        details.appendChild(textarea);
+        const pages = createNode('fieldset', 'ytc-keyword-pages');
+        pages.appendChild(createNode('legend', null, 'Apply on — History is always excluded'));
+        const list = createNode('div', 'ytc-keyword-page-list');
+        Object.entries(KEYWORD_PAGE_LABELS).forEach(([page, title]) => {
+            const wrap = createNode('label');
+            const input = createNode('input');
+            input.type = 'checkbox';
+            input.dataset.keywordPage = page;
+            input.checked = settings.keywordFilterPages.includes(page);
+            input.addEventListener('change', () => {
+                settings.keywordFilterPages = Array.from(list.querySelectorAll('input:checked')).map((box) => box.dataset.keywordPage);
+                saveSettings();
+            });
+            wrap.appendChild(input);
+            wrap.appendChild(createNode('span', null, title));
+            list.appendChild(wrap);
+        });
+        pages.appendChild(list);
+        details.appendChild(pages);
+        return details;
+    }
+
     function createWatchedModeSlider() {
         const wrap = createNode('div', 'ytc-slider-wrap');
         const head = createNode('div', 'ytc-slider-head');
@@ -2115,22 +2918,17 @@
         master.classList.add('ytc-master');
         header.appendChild(master);
 
-        const videoSection = createSection(
-            'Videos',
+        const browsingSection = createSection(
+            'Browsing',
             createSwitchRow(
                 'Hide Shorts',
                 'Remove Shorts from feeds, sidebar, and direct links',
                 'hideShorts'
             ),
-            createWatchedModeSlider(),
-            createSwitchRow(
-                'Hide YouTube Mixes',
-                'Keep regular playlists, remove auto-generated Mixes',
-                'hideMixes'
-            )
+            createWatchedModeSlider()
         );
         const interfaceSection = createSection(
-            'Interface',
+            'Sections',
             createSwitchRow(
                 'Hide YouTube games',
                 'Remove Playables shelves and sidebar entries',
@@ -2142,9 +2940,9 @@
                 'hideHomeShelves'
             ),
             createSwitchRow(
-                'Hide promotion labels',
-                'Remove paid-promotion banners from thumbnail previews',
-                'hidePaidPromotion'
+                'Clean search results',
+                'Hide recognized recommendation sections, not regular results',
+                'hideSearchSections'
             )
         );
 
@@ -2170,7 +2968,7 @@
         );
 
         const extrasSection = createSection(
-            'Extras',
+            'Ratings',
             createSwitchRow(
                 'Show dislikes',
                 'Display Return YouTube Dislike counts on watch pages',
@@ -2178,14 +2976,63 @@
             )
         );
 
+        const playbackSection = createSection(
+            'While watching',
+            createSwitchRow(
+                'Floating player',
+                'Keep playing in the corner when you scroll to comments',
+                'floatingPlayer'
+            ),
+            createSwitchRow(
+                'Independent recommendations',
+                'Scroll the right-hand list without moving the video or comments',
+                'scrollRecommendations'
+            )
+        );
+
+        const overlaySection = createSection(
+            'Overlays',
+            createSwitchRow(
+                'Hide end cards',
+                'Remove cards covering the last seconds; keep subtitles and playback controls',
+                'hideEndCards'
+            ),
+            createSwitchRow(
+                'Hide promotion labels',
+                'Remove paid-promotion banners from previews and the floating player',
+                'hidePaidPromotion'
+            )
+        );
+
+        const videoTypeSection = createSection(
+            'Video types',
+            createSwitchRow(
+                'Hide YouTube Mixes',
+                'Keep regular playlists, remove auto-generated Mixes',
+                'hideMixes'
+            ),
+            createSwitchRow(
+                'Hide members-only videos',
+                'Hide all membership-badged videos, including ones you can access; never History',
+                'hideMembersOnly'
+            )
+        );
+
+        const keywordSection = createSection(
+            'Title filters',
+            createSwitchRow('Filter video titles', 'Hide titles containing your words or phrases on selected pages', 'filterVideoTitles'),
+            createKeywordEditor()
+        );
+
         const tabs = createNode('div', 'ytc-tabs');
         tabs.setAttribute('role', 'tablist');
         tabs.setAttribute('aria-label', 'Settings sections');
         const body = createNode('div', 'ytc-menu-body');
         const groups = [
-            { id: 'videos', title: 'Videos', sections: [videoSection, interfaceSection] },
+            { id: 'browse', title: 'Browse', sections: [browsingSection, layoutSection, interfaceSection] },
             { id: 'subscriptions', title: 'Subscriptions', sections: [subscriptionsSection] },
-            { id: 'layout', title: 'Layout', sections: [layoutSection, extrasSection] }
+            { id: 'filters', title: 'Filters', sections: [videoTypeSection, keywordSection] },
+            { id: 'player', title: 'Player', sections: [playbackSection, overlaySection, extrasSection] }
         ];
         groups.forEach((group, index) => {
             const tab = createNode('button', 'ytc-tab', group.title);
@@ -2248,6 +3095,8 @@
         const tab = menu?.querySelector('#ytc-tab-' + tabId);
         if (!tab) return;
         const changed = currentMenuTab !== tabId;
+        const body = menu.querySelector('.ytc-menu-body');
+        if (changed) menuTabScrollPositions.set(currentMenuTab, body.scrollTop);
         currentMenuTab = tabId;
         menu.querySelectorAll('.ytc-tab').forEach((button) => {
             const selected = button === tab;
@@ -2257,7 +3106,7 @@
         menu.querySelectorAll('.ytc-panel').forEach((panel) => {
             panel.hidden = panel.id !== 'ytc-panel-' + tabId;
         });
-        if (changed) menu.querySelector('.ytc-menu-body').scrollTop = 0;
+        if (changed) body.scrollTop = menuTabScrollPositions.get(tabId) || 0;
         if (focus) tab.focus({ preventScroll: true });
         positionMenu();
     }
@@ -2331,6 +3180,13 @@
 
         const masterState = menu.querySelector('#ytc-help-enabled');
         if (masterState) masterState.textContent = settings.enabled ? 'Active' : 'Paused';
+        const keywords = menu.querySelector('#ytc-title-keywords');
+        if (keywords && document.activeElement !== keywords && keywords.value !== settings.blockedTitleKeywords) {
+            keywords.value = settings.blockedTitleKeywords;
+        }
+        menu.querySelectorAll('input[data-keyword-page]').forEach((input) => {
+            input.checked = settings.keywordFilterPages.includes(input.dataset.keywordPage);
+        });
 
         menu.querySelectorAll('.ytc-switch[data-setting]').forEach((button) => {
             const settingKey = button.dataset.setting;
@@ -2389,11 +3245,15 @@
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['href', 'overlay-style', 'is-shorts']
+            attributeFilter: ['href', 'overlay-style', 'is-shorts', 'title'],
+            characterData: true
         });
 
         ['yt-navigate-finish', 'yt-page-data-updated', 'popstate'].forEach((eventName) => {
             window.addEventListener(eventName, () => {
+                if (eventName !== 'yt-page-data-updated') floatingNavigation = false;
+                scheduleFloatingPlayer();
+                scheduleRecommendationsPane();
                 updateWatchedVideosState();
                 document.documentElement.dataset.ytcHideUnsubscribedCollaborations =
                     collaborationFilterActive() ? 'true' : 'false';
@@ -2401,9 +3261,26 @@
                 scheduleCleanup();
             });
         });
+        window.addEventListener('yt-navigate-start', () => {
+            floatingNavigation = true;
+            resetFloatingPlayer();
+            resetRecommendationsPane();
+        });
         window.addEventListener('load', scheduleCleanup);
         window.addEventListener('resize', positionMenu);
+        window.addEventListener('resize', scheduleFloatingPlayer);
+        window.addEventListener('resize', scheduleRecommendationsPane);
         window.addEventListener('scroll', positionMenu, true);
+        window.addEventListener('scroll', scheduleFloatingPlayer, { passive: true });
+        document.addEventListener('fullscreenchange', scheduleFloatingPlayer);
+        document.addEventListener('fullscreenchange', scheduleRecommendationsPane);
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && floatingPlayer?.gesture) {
+                event.preventDefault();
+                event.stopPropagation();
+                stopFloatingGesture(floatingPlayer, false);
+            }
+        }, true);
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) {
                 scheduleCleanup();
@@ -2411,6 +3288,12 @@
             }
         });
         window.addEventListener('storage', (event) => {
+            if (event.key === FLOATING_LAYOUT_KEY) {
+                stopFloatingGesture(floatingPlayer, false);
+                floatingLayout = loadFloatingLayout();
+                scheduleFloatingPlayer();
+                return;
+            }
             if (event.key !== STORAGE_KEY) return;
 
             settings = loadSettings();
